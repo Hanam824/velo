@@ -1,0 +1,28 @@
+[package]
+name = "velo-gui"
+description = "Velo Download Manager desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "velo"
+path = "src/main.rs"
+
+[dependencies]
+velo-core.workspace = true
+velo-engine.workspace = true
+velo-platform.workspace = true
+velo-store.workspace = true
+slint.workspace = true
+
+[dev-dependencies]
+# Must match the slint version: runs the UI without a window system.
+i-slint-backend-testing = "=1.18.1"
+
+[build-dependencies]
+slint-build.workspace = true
+
+[lints]
+workspace = true

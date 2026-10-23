@@ -1,0 +1,13 @@
+[package]
+name = "velo-core"
+description = "Velo domain types: downloads, segments, categories, queues and settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

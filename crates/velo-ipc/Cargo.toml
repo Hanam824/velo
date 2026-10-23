@@ -1,0 +1,13 @@
+[package]
+name = "velo-ipc"
+description = "Velo local-socket protocol between the app, CLI and browser host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+velo-core.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "velo-store"
+description = "Velo persistence for the download list, segment state and settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+velo-core.workspace = true
+
+[lints]
+workspace = true

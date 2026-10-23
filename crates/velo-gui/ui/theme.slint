@@ -1,0 +1,39 @@
+// Velo's colour tokens. Widgets from std-widgets follow `Palette`; Velo's own drawing (toolbar
+// icons, segment bar, status colours) uses `Theme`, so light and dark both come from one place.
+
+import { Palette } from "std-widgets.slint";
+
+export enum Appearance { system, light, dark }
+
+export global Theme {
+    // The user's choice in Options → Appearance. `system` follows the OS setting.
+    in-out property <Appearance> appearance: Appearance.system;
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    // Surfaces and text.
+    out property <brush> window: Palette.background;
+    out property <brush> panel: Palette.alternate-background;
+    out property <brush> text: Palette.foreground;
+    out property <brush> text-muted: dark ? #9da7b3 : #59636e;
+    out property <brush> border: Palette.border;
+    out property <brush> icon: dark ? #c9d1d9 : #3d444d;
+
+    // Brand and status colours.
+    out property <brush> accent: dark ? #4493f8 : #1f6feb;
+    out property <brush> success: dark ? #3fb950 : #1a7f37;
+    out property <brush> warning: dark ? #d29922 : #9a6700;
+    out property <brush> danger: dark ? #f85149 : #cf222e;
+
+    // Segment bar (progress dialog): downloaded data, the rest of the file, and the marks where
+    // each connection's range starts.
+    out property <brush> segment-done: accent;
+    out property <brush> segment-remaining: dark ? #2d333b : #ffffff;
+    out property <brush> segment-start: dark ? #ff7b9c : #d6336c;
+
+    // Applies `appearance` to the std-widgets palette.
+    public function apply(value: Appearance) {
+        self.appearance = value;
+        Palette.color-scheme = value == Appearance.light ? ColorScheme.light
+            : value == Appearance.dark ? ColorScheme.dark : ColorScheme.unknown;
+    }
+}

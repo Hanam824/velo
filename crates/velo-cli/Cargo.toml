@@ -1,0 +1,18 @@
+[package]
+name = "velo-cli"
+description = "Velo command-line front-end"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "velo-cli"
+path = "src/main.rs"
+
+[dependencies]
+velo-core.workspace = true
+velo-ipc.workspace = true
+
+[lints]
+workspace = true

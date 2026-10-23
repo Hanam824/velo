@@ -1,0 +1,98 @@
+name: Nightly build
+
+# Builds main every night and replaces the `nightly` pre-release with it, when main has changed.
+# It never creates version tags and is never marked as the latest release: versioned releases are
+# made by hand with release.yml.
+on:
+  schedule:
+    - cron: "0 17 * * *" # 17:00 UTC = 00:00 in Vietnam (UTC+7)
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  # Decides from git history alone: build when main has non-doc commits since the last nightly
+  # build. (A "pull requests merged in the last 24 hours" check would miss merges whenever GitHub
+  # starts the scheduled run late, which it often does.) Worked out once, so every platform build
+  # uses the same version and the same commit.
+  version:
+    name: Work out the version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0 # full history and tags for nightly-version.sh
+
+      - name: Version
+        id: version
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if version="$(./scripts/nightly-version.sh)"; then
+            echo "Version: $version"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          else
+            # nightly-version.sh printed why: no commits, or only doc changes, since the last build.
+            echo "Nothing to build."
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build
+    needs: version
+    if: needs.version.outputs.version != ''
+    uses: ./.github/workflows/build-release.yml
+    permissions:
+      contents: read
+    with:
+      version: ${{ needs.version.outputs.version }}
+      sha: ${{ needs.version.outputs.sha }}
+
+  # Runs only when every build passed, so the pre-release always has all five archives.
+  publish:
+    name: Replace the nightly pre-release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # move the `nightly` tag and replace its release
+    steps:
+      - name: Check out the scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Replace the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          SHA: ${{ needs.version.outputs.sha }}
+        run: |
+          ls -l dist
+          # The previous nightly build and its tag; either may be missing.
+          gh release delete nightly --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" > /dev/null 2>&1 || true
+          gh release create nightly dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --title "Velo nightly ($VERSION)" \
+            --prerelease \
+            --latest=false \
+            --notes "Nightly build of \`main\` at $SHA, not a release: it's replaced by the next one. For a stable version, use the latest release.
+
+          $(./scripts/release-notes.sh "$VERSION")"
