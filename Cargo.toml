@@ -7,6 +7,8 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.89"
+# Velo ships as an app, not on crates.io; cargo-deny also needs this to accept path dependencies.
+publish = false
 
 [workspace.dependencies]
 velo-core = { path = "crates/velo-core" }
