@@ -27,7 +27,7 @@ jobs:
       previous: ${{ steps.check.outputs.previous }}
     steps:
       - name: Check out main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0 # full history and tags
@@ -70,12 +70,12 @@ jobs:
       contents: write # create the tag and the release
     steps:
       - name: Check out the scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.check.outputs.sha }}
 
       - name: Download the archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
