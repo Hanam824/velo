@@ -10,8 +10,10 @@ Status: early development. See [`docs/PLAN.md`](docs/PLAN.md) for the design and
 ## Build
 
 ```sh
-cargo build --workspace
-cargo run -p velo-gui
+./run.sh                # the desktop app
+./run.sh --release      # optimized build
+./run.sh cli --help     # the command-line tool
+./run.sh test           # fmt, clippy and tests, as CI runs them
 ```
 
 On Linux, install `libfontconfig1-dev` and `libxkbcommon-dev` first.
