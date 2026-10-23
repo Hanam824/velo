@@ -42,7 +42,7 @@ jobs:
         shell: bash # Git Bash on Windows, for package-release.sh
     steps:
       - name: Check out the release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sha }}
 
@@ -72,7 +72,7 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Upload the archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: velo-${{ matrix.name }}
           path: ${{ steps.package.outputs.archive }}
