@@ -2,10 +2,10 @@
 // context menu. Rust builds the rows, sorts them and decides what each menu item can do.
 
 import { ListView } from "std-widgets.slint";
+import { FileKind, Icons } from "icons.slint";
 import { Theme } from "theme.slint";
 
-// Which icon a download's row shows, from its file's category.
-export enum FileKind { other, archive, document, music, program, video }
+export { FileKind }
 
 // One row of the download list, already formatted for display.
 export struct DownloadRow {
@@ -117,26 +117,6 @@ export component DownloadList inherits Rectangle {
     in-out property <length> last-try-width: 140px;
 
     background: Theme.window;
-
-    // The icon image for a file kind.
-    function kind-icon(kind: FileKind) -> image {
-        if kind == FileKind.archive {
-            return @image-url("../../../assets/icons/lucide/file-archive.svg");
-        }
-        if kind == FileKind.document {
-            return @image-url("../../../assets/icons/lucide/file-text.svg");
-        }
-        if kind == FileKind.music {
-            return @image-url("../../../assets/icons/lucide/music.svg");
-        }
-        if kind == FileKind.program {
-            return @image-url("../../../assets/icons/lucide/package.svg");
-        }
-        if kind == FileKind.video {
-            return @image-url("../../../assets/icons/lucide/film.svg");
-        }
-        @image-url("../../../assets/icons/lucide/file.svg")
-    }
 
     keys := FocusScope {
         key-pressed(event) => {
@@ -296,7 +276,7 @@ export component DownloadList inherits Rectangle {
                                 padding-left: 6px;
                                 spacing: 6px;
                                 Image {
-                                    source: root.kind-icon(row.kind);
+                                    source: Icons.file(row.kind);
                                     colorize: Theme.icon;
                                     width: 16px;
                                 }

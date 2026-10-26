@@ -20,6 +20,7 @@ pub use fetch::fetch_range;
 pub use filename::{file_name, sanitize_file_name, unique_file_name};
 pub use merge::merge;
 pub use probe::{Probe, probe};
+pub use reqwest::Url;
 pub use segmented::{Options, Progress, download_segments};
 pub use tokio_util::sync::CancellationToken;
 
@@ -86,14 +87,58 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// identifies itself as `Velo/<version>`. Responses are never decompressed, so byte offsets
 /// match the file on the server.
 pub fn client() -> Result<reqwest::Client> {
+    client_for(None)
+}
+
+/// Builds a client like [`client`] that also sends `credentials`, if any, with every request
+/// as HTTP Basic authorization.
+pub fn client_for(credentials: Option<&Credentials>) -> Result<reqwest::Client> {
     static PROVIDER: Once = Once::new();
     PROVIDER.call_once(|| {
         // Fails only if another provider is already installed, which is fine too.
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(credentials) = credentials {
+        let mut value = credentials.basic_header();
+        value.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
     Ok(reqwest::Client::builder()
         .user_agent(concat!("Velo/", env!("CARGO_PKG_VERSION")))
+        .default_headers(headers)
         .build()?)
+}
+
+/// A user name and password for a server that asks for them.
+///
+/// The engine keeps these in memory only; they are never written to the download list.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Credentials {
+    /// The user name.
+    pub user: String,
+    /// The password.
+    pub password: String,
+}
+
+impl Credentials {
+    /// The `Authorization: Basic …` header value.
+    fn basic_header(&self) -> reqwest::header::HeaderValue {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:{}", self.user, self.password));
+        reqwest::header::HeaderValue::from_str(&format!("Basic {encoded}"))
+            .expect("base64 is a valid header value")
+    }
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("user", &self.user)
+            .field("password", &"…")
+            .finish()
+    }
 }
 
 /// Path of a segment's part file: `<temp_dir>/<download id>/<segment id>.part`.

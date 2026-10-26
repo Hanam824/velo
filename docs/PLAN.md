@@ -338,6 +338,7 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - Generic HLS/DASH sniffing on non-YouTube sites.
 - FTP, auto-update and localization.
 - Toolbar buttons Grabber (with the Site Grabber) and Share (needs a project page to share).
+- Saved logins (Options → Site Logins, and Add URL credentials that survive a restart): needs the OS keychain so passwords are never stored in plain text. Until then credentials live in memory only.
 
 ---
 

@@ -1,0 +1,26 @@
+// Icons shared by several windows.
+
+// Which icon a download shows, from its file's category.
+export enum FileKind { other, archive, document, music, program, video }
+
+export global Icons {
+    // The icon for a file kind.
+    public pure function file(kind: FileKind) -> image {
+        if kind == FileKind.archive {
+            return @image-url("../../../assets/icons/lucide/file-archive.svg");
+        }
+        if kind == FileKind.document {
+            return @image-url("../../../assets/icons/lucide/file-text.svg");
+        }
+        if kind == FileKind.music {
+            return @image-url("../../../assets/icons/lucide/music.svg");
+        }
+        if kind == FileKind.program {
+            return @image-url("../../../assets/icons/lucide/package.svg");
+        }
+        if kind == FileKind.video {
+            return @image-url("../../../assets/icons/lucide/film.svg");
+        }
+        @image-url("../../../assets/icons/lucide/file.svg")
+    }
+}

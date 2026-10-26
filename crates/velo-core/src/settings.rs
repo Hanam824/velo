@@ -24,11 +24,24 @@ pub struct Settings {
     pub download_dir: Option<PathBuf>,
     /// Categories, in the order they are matched and shown.
     pub categories: Vec<Category>,
+    /// Addresses entered in Add URL, newest first, at most [`Settings::URL_HISTORY`].
+    pub url_history: Vec<String>,
 }
 
 impl Settings {
     /// Highest allowed [`Settings::max_connections`].
     pub const MAX_CONNECTIONS: u32 = 32;
+
+    /// How many addresses [`Settings::url_history`] keeps.
+    pub const URL_HISTORY: usize = 20;
+
+    /// Puts `url` at the front of the address history, removing an older copy and the oldest
+    /// entry if the history is full.
+    pub fn remember_url(&mut self, url: &str) {
+        self.url_history.retain(|u| u != url);
+        self.url_history.insert(0, url.to_string());
+        self.url_history.truncate(Self::URL_HISTORY);
+    }
 
     /// Checks that every value is in range.
     pub fn validate(&self) -> Result<()> {
@@ -56,6 +69,7 @@ impl Default for Settings {
             temp_dir: None,
             download_dir: None,
             categories: Category::defaults(),
+            url_history: Vec::new(),
         }
     }
 }
@@ -63,6 +77,26 @@ impl Default for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_url_history_keeps_the_newest_once() {
+        let mut settings = Settings::default();
+        for n in 0..25 {
+            settings.remember_url(&format!("http://example.test/{n}"));
+        }
+        settings.remember_url("http://example.test/10");
+        assert_eq!(settings.url_history.len(), Settings::URL_HISTORY);
+        assert_eq!(settings.url_history[0], "http://example.test/10");
+        assert_eq!(settings.url_history[1], "http://example.test/24");
+        assert_eq!(
+            settings
+                .url_history
+                .iter()
+                .filter(|u| u.ends_with("/10"))
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn defaults_are_valid_and_out_of_range_values_are_not() {

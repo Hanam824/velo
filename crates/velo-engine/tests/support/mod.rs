@@ -15,6 +15,8 @@
 //! - `/versioned/{name}`: like `/slower`, with [`versioned_body`] and `ETag` `"v<n>"` for the
 //!   current version `n`, which starts at 0.
 //! - `/bump`: moves `/versioned` to the next version.
+//! - `/auth/{name}`: like `/files`, but only with Basic authorization for [`USER`] and
+//!   [`PASSWORD`]; `401` otherwise.
 //! - anything else: `404`.
 
 #![allow(dead_code)]
@@ -26,14 +28,20 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::header::{
-    ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED,
-    LOCATION, RANGE,
+    ACCEPT_RANGES, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG,
+    LAST_MODIFIED, LOCATION, RANGE,
 };
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::routing::get;
 
 /// Size of the files the server sends.
 pub const SIZE: usize = 300_000;
+
+/// User name `/auth` accepts.
+pub const USER: &str = "velo";
+
+/// Password `/auth` accepts.
+pub const PASSWORD: &str = "s3cret pass";
 
 /// `ETag` of the files under `/files`.
 pub const ETAG_VALUE: &str = "\"v1\"";
@@ -164,6 +172,17 @@ pub async fn start() -> String {
             get(move || async move {
                 bump.fetch_add(1, Ordering::Relaxed);
                 status(StatusCode::NO_CONTENT)
+            }),
+        )
+        .route(
+            "/auth/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                // "velo:s3cret pass" in base64.
+                let expected = "Basic dmVsbzpzM2NyZXQgcGFzcw==";
+                if headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) != Some(expected) {
+                    return status(StatusCode::UNAUTHORIZED);
+                }
+                serve(&method, &headers, &body(), true, &[])
             }),
         )
         .route(

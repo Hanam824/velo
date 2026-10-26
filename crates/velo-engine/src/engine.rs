@@ -4,7 +4,7 @@
 //! so it can be used from the UI thread. Everything that happens comes back as
 //! [`EngineEvent`]s on a broadcast channel: the app's list and its store both listen there.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use velo_core::{Download, DownloadId, DownloadState, EngineEvent, ProgressUpdate};
 
 use crate::download::{RunContext, Stage, remove_dir, run};
-use crate::{Error, Options, Progress, Result};
+use crate::{Credentials, Error, Options, Progress, Result, client_for};
 
 /// How often running downloads report [`EngineEvent::Progress`].
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -52,6 +52,9 @@ pub struct NewDownload {
     pub description: String,
     /// Whether to start it right away; otherwise it waits as queued.
     pub start: bool,
+    /// Sent to the server as Basic authorization. Kept in memory only, so a download that needs
+    /// them can't resume after the app restarts until they are given again.
+    pub credentials: Option<Credentials>,
 }
 
 /// A handle to the engine task. Cloning it gives another handle to the same engine.
@@ -91,6 +94,7 @@ impl Engine {
                 .collect(),
             events: events.clone(),
             task_tx,
+            clients: HashMap::new(),
             shutdown: Vec::new(),
         };
         tokio::spawn(actor.run(command_rx, task_rx));
@@ -116,7 +120,7 @@ impl Engine {
         download.category = new.category;
         download.description = new.description;
         download.added_at = Some(now());
-        self.send(Command::Add(Box::new(download), new.start));
+        self.send(Command::Add(Box::new(download), new.start, new.credentials));
         id
     }
 
@@ -167,7 +171,7 @@ impl Engine {
 /// A request from an [`Engine`] handle.
 #[derive(Debug)]
 enum Command {
-    Add(Box<Download>, bool),
+    Add(Box<Download>, bool, Option<Credentials>),
     Resume(DownloadId),
     Pause(DownloadId),
     PauseAll,
@@ -191,6 +195,8 @@ struct Actor {
     downloads: BTreeMap<DownloadId, Entry>,
     events: broadcast::Sender<EngineEvent>,
     task_tx: mpsc::UnboundedSender<TaskMessage>,
+    /// Clients that send a download's credentials, by download; others use the shared client.
+    clients: HashMap<DownloadId, Client>,
     /// Waiting [`Engine::shutdown`] calls; once set, the engine ends when nothing runs.
     shutdown: Vec<oneshot::Sender<()>>,
 }
@@ -261,9 +267,17 @@ impl Actor {
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Add(download, start) => {
+            Command::Add(download, start, credentials) => {
                 let download = *download;
                 let id = download.id;
+                if let Some(credentials) = credentials {
+                    match client_for(Some(&credentials)) {
+                        Ok(client) => {
+                            self.clients.insert(id, client);
+                        }
+                        Err(error) => eprintln!("velo: couldn't set up authorization: {error}"),
+                    }
+                }
                 self.emit(EngineEvent::Added(download.clone()));
                 self.downloads.insert(id, Entry::new(download));
                 if start {
@@ -331,7 +345,8 @@ impl Actor {
             rate: RateMeter::default(),
         };
         let mut download = entry.download.clone();
-        let (client, temp_dir) = (self.config.client.clone(), self.config.temp_dir.clone());
+        let client = self.clients.get(&id).unwrap_or(&self.config.client).clone();
+        let temp_dir = self.config.temp_dir.clone();
         let (options, progress) = (self.config.options.clone(), running.progress.clone());
         let (cancel, tx) = (running.cancel.clone(), self.task_tx.clone());
         entry.running = Some(running);
@@ -418,6 +433,7 @@ impl Actor {
         let Some(entry) = self.downloads.remove(&id) else {
             return;
         };
+        self.clients.remove(&id);
         let parts = self.config.temp_dir.join(id.0.to_string());
         let file =
             (delete_file && entry.download.is_finished()).then(|| entry.download.save_path());

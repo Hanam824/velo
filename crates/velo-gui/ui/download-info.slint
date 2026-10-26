@@ -1,0 +1,166 @@
+// The Download File Info dialog: shown after Add URL while the server is asked about the file,
+// to choose where it goes before starting.
+
+import { Button, CheckBox, ComboBox, GridBox, HorizontalBox, LineEdit, Spinner, VerticalBox } from "std-widgets.slint";
+import { FileKind, Icons } from "icons.slint";
+import { Theme } from "theme.slint";
+
+export component DownloadInfoDialog inherits Window {
+    in property <string> url;
+    // Category names; the first is "None".
+    in property <[string]> categories;
+    in-out property <int> category-index;
+    // Full path the file is saved as.
+    in-out property <string> save-path;
+    in-out property <bool> remember-path;
+    in-out property <string> description;
+    in property <FileKind> kind;
+    // The size from the server, or "Unknown" when it didn't say.
+    in property <string> size;
+    // While the server is being asked: true.
+    in property <bool> probing: true;
+    // The error message if asking the server failed.
+    in property <string> error;
+
+    callback category-changed(index: int);
+    // The user typed in Save As.
+    callback save-path-edited();
+    callback browse();
+    callback start-download();
+    callback download-later();
+    callback cancelled();
+
+    title: "Download File Info";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 600px;
+    min-width: 460px;
+    background: Theme.window;
+
+    private property <bool> ready: !root.probing && root.error == "";
+
+    VerticalBox {
+        HorizontalLayout {
+            spacing: 12px;
+            GridBox {
+                padding: 0;
+                horizontal-stretch: 1;
+                Row {
+                    Text {
+                        text: "URL:";
+                        vertical-alignment: center;
+                        color: Theme.text;
+                    }
+                    Text {
+                        text: root.url;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        color: Theme.text-muted;
+                    }
+                }
+                Row {
+                    Text {
+                        text: "Category:";
+                        vertical-alignment: center;
+                        color: Theme.text;
+                    }
+                    ComboBox {
+                        model: root.categories;
+                        current-index <=> root.category-index;
+                        selected => { root.category-changed(self.current-index); }
+                    }
+                }
+                Row {
+                    Text {
+                        text: "Save As:";
+                        vertical-alignment: center;
+                        color: Theme.text;
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        LineEdit {
+                            text <=> root.save-path;
+                            edited => { root.save-path-edited(); }
+                        }
+                        Button {
+                            text: "…";
+                            enabled: root.ready;
+                            clicked => { root.browse(); }
+                        }
+                    }
+                }
+                Row {
+                    Rectangle { }
+                    CheckBox {
+                        text: root.category-index > 0
+                            ? "Remember this path for “" + root.categories[root.category-index] + "”"
+                            : "Remember this path for the category";
+                        enabled: root.category-index > 0;
+                        checked <=> root.remember-path;
+                    }
+                }
+                Row {
+                    Text {
+                        text: "Description:";
+                        vertical-alignment: center;
+                        color: Theme.text;
+                    }
+                    LineEdit {
+                        text <=> root.description;
+                    }
+                }
+            }
+            VerticalLayout {
+                width: 96px;
+                alignment: start;
+                spacing: 6px;
+                HorizontalLayout {
+                    alignment: center;
+                    Image {
+                        source: Icons.file(root.kind);
+                        colorize: Theme.icon;
+                        width: 48px;
+                        height: 48px;
+                    }
+                }
+                Text {
+                    text: root.probing ? "" : root.size;
+                    horizontal-alignment: center;
+                    color: Theme.text;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            if root.probing: Spinner {
+                indeterminate: true;
+                width: 16px;
+                height: 16px;
+            }
+            Text {
+                text: root.probing ? "Getting file information…" : root.error;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                color: root.error != "" ? Theme.danger : Theme.text-muted;
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "Start Download";
+                primary: true;
+                enabled: root.ready;
+                clicked => { root.start-download(); }
+            }
+            Button {
+                text: "Download Later";
+                enabled: root.ready;
+                clicked => { root.download-later(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancelled(); }
+            }
+        }
+    }
+}
