@@ -150,7 +150,9 @@ fn forward(cli: &Cli, endpoint: &Endpoint) -> Result<()> {
                 file_name: cli.file.clone(),
                 start: !cli.add_only,
                 silent: cli.no_questions,
-                itag: cli.itag,
+                itags: cli.itag.into_iter().collect(),
+                referer: None,
+                cookies: None,
             },
         )?;
     }

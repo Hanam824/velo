@@ -13,7 +13,15 @@ etcetera.workspace = true
 notify-rust.workspace = true
 opener.workspace = true
 rfd.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Registry keys that tell browsers where the native-messaging host's manifest is.
+winreg = "0.56"
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

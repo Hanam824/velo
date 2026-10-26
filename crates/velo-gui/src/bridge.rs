@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 
 use tokio::sync::{broadcast, oneshot};
 use velo_core::{Download, EngineEvent, Queue, Resolver, Settings};
-use velo_engine::{Credentials, Engine, EngineConfig, RequestOptions, RetryPolicy};
+use velo_engine::{Engine, EngineConfig, RequestOptions, RetryPolicy};
 use velo_extract::Extractor;
 use velo_store::Store;
 
@@ -164,19 +164,9 @@ static NEXT_TICKET: AtomicU64 = AtomicU64::new(0);
 impl Prober for Bridge {
     /// Probes on the runtime, then hands the result back to the UI thread, where `done` waits
     /// (it can hold UI state, which can't cross threads).
-    fn probe(
-        &self,
-        url: String,
-        settings: Settings,
-        credentials: Option<Credentials>,
-        done: ProbeDone,
-    ) {
+    fn probe(&self, url: String, settings: Settings, request: RequestOptions, done: ProbeDone) {
         let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
         WAITING.with(|waiting| waiting.borrow_mut().insert(ticket, done));
-        let request = RequestOptions {
-            credentials,
-            ..RequestOptions::default()
-        };
         self.runtime.spawn(async move {
             let result = match velo_engine::client_with(&settings, &request) {
                 Ok(client) => velo_engine::probe(&client, &url)

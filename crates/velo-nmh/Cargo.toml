@@ -1,0 +1,27 @@
+[package]
+name = "velo-nmh"
+description = "Velo's native-messaging host: lets the browser extension talk to the app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "velo-nmh"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+velo-core.workspace = true
+velo-engine.workspace = true
+velo-extract.workspace = true
+velo-ipc.workspace = true
+velo-platform.workspace = true
+velo-store.workspace = true
+
+[lints]
+workspace = true

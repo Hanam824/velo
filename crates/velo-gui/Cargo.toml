@@ -52,10 +52,14 @@ icons = [
     "../../packaging/icons/velo-512.png",
     "../../packaging/icons/velo-512@2x.png",
 ]
-binaries = [{ path = "velo", main = true }, { path = "velo-cli", main = false }]
+binaries = [
+    { path = "velo", main = true },
+    { path = "velo-cli", main = false },
+    { path = "velo-nmh", main = false },
+]
 out-dir = "../../dist/installers"
 # The release binaries come from package-release.sh, which builds both before packaging.
-before-packaging-command = "cargo build --release -p velo-gui -p velo-cli"
+before-packaging-command = "cargo build --release -p velo-gui -p velo-cli -p velo-nmh"
 
 [package.metadata.packager.macos]
 minimum-system-version = "15.0"
