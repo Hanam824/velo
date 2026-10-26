@@ -55,6 +55,8 @@ export component Toolbar inherits Rectangle {
     in property <bool> can-stop-all;
     in property <bool> can-delete;
     in property <bool> can-delete-completed;
+    in property <bool> can-start-queue;
+    in property <bool> can-stop-queue;
     callback add-url();
     callback resume();
     callback stop();
@@ -62,6 +64,9 @@ export component Toolbar inherits Rectangle {
     callback delete();
     callback delete-completed();
     callback options();
+    callback scheduler();
+    callback start-queue();
+    callback stop-queue();
 
     background: Theme.panel;
     height: 66px;
@@ -109,6 +114,23 @@ export component Toolbar inherits Rectangle {
             icon: @image-url("../../../assets/icons/lucide/settings.svg");
             label: "Options";
             clicked => { root.options(); }
+        }
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/calendar-clock.svg");
+            label: "Scheduler";
+            clicked => { root.scheduler(); }
+        }
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/list-start.svg");
+            label: "Start Queue";
+            enabled: root.can-start-queue;
+            clicked => { root.start-queue(); }
+        }
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/list-x.svg");
+            label: "Stop Queue";
+            enabled: root.can-stop-queue;
+            clicked => { root.stop-queue(); }
         }
     }
 

@@ -7,6 +7,12 @@ import { Theme } from "theme.slint";
 
 export { FileKind }
 
+// A queue a download can be added to.
+export struct QueueChoice {
+    id: int,
+    name: string,
+}
+
 // One row of the download list, already formatted for display.
 export struct DownloadRow {
     // The download's id.
@@ -112,6 +118,11 @@ export component DownloadList inherits Rectangle {
     callback open-file(id: int);
     callback open-folder(id: int);
     callback properties(id: int);
+    callback enqueue(id: int, queue: int);
+    callback dequeue(id: int);
+
+    // The queues, for Add to Queue.
+    in property <[QueueChoice]> queue-choices;
 
     in-out property <length> name-width: 260px;
     in-out property <length> queue-width: 32px;
@@ -261,6 +272,19 @@ export component DownloadList inherits Rectangle {
                         MenuItem {
                             title: "Delete";
                             activated => { root.delete(row.id); }
+                        }
+                        MenuSeparator { }
+                        Menu {
+                            title: "Add to Queue";
+                            for choice in root.queue-choices: MenuItem {
+                                title: choice.name;
+                                activated => { root.enqueue(row.id, choice.id); }
+                            }
+                        }
+                        MenuItem {
+                            title: "Delete from Queue";
+                            enabled: row.queue != "";
+                            activated => { root.dequeue(row.id); }
                         }
                         MenuSeparator { }
                         MenuItem {

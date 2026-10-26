@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::sync::broadcast::Receiver;
-use velo_core::{ConnectionLimit, Download, DownloadId, DownloadState, EngineEvent, Settings};
+use velo_core::{
+    ConnectionLimit, Download, DownloadId, DownloadState, EngineEvent, Queue, QueueId, Settings,
+};
 use velo_engine::{
     Credentials, DownloadEdit, Engine, EngineConfig, NewDownload, RequestOptions, RetryPolicy,
 };
@@ -38,7 +40,7 @@ fn engine_with(root: &Path, settings: Settings, downloads: Vec<Download>) -> Eng
             delay: Duration::from_millis(5),
         },
     };
-    Engine::start(config, downloads).unwrap()
+    Engine::start(config, downloads, Vec::new()).unwrap()
 }
 
 /// A download of `url` into `root/save`, started at once if `start`.
@@ -441,4 +443,142 @@ async fn properties_change_a_waiting_download_but_only_the_description_of_a_fini
     })
     .await;
     assert_eq!(complete.file_name, "renamed_.bin");
+}
+
+/// Waits for queue `id` to be reported, and returns it as reported.
+async fn wait_for_queue(
+    events: &mut Receiver<EngineEvent>,
+    id: QueueId,
+    done: impl Fn(&Queue) -> bool,
+) -> Queue {
+    wait_for(events, |event| match event {
+        EngineEvent::QueueChanged(q) if q.id == id && done(q) => Some(q.clone()),
+        _ => None,
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_queue_runs_its_downloads_one_at_a_time_then_finishes() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+    let first = engine.add(new_download(
+        root.path(),
+        format!("{base}/files/one.bin"),
+        false,
+    ));
+    let second = engine.add(new_download(
+        root.path(),
+        format!("{base}/files/two.bin"),
+        false,
+    ));
+    engine.enqueue(QueueId::MAIN, vec![first, second]);
+    wait_for_queue(&mut events, QueueId::MAIN, |q| {
+        q.downloads == [first, second]
+    })
+    .await;
+
+    engine.start_queue(QueueId::MAIN);
+    // Collect what happens until the queue reports it is done.
+    let mut seen = Vec::new();
+    wait_for(&mut events, |event| {
+        match event {
+            EngineEvent::Changed(d) if d.state == DownloadState::Probing => {
+                seen.push(format!("start {}", d.id.0))
+            }
+            EngineEvent::Changed(d) if d.state == DownloadState::Complete => {
+                seen.push(format!("done {}", d.id.0))
+            }
+            EngineEvent::QueueFinished(id) if *id == QueueId::MAIN => return Some(()),
+            _ => {}
+        }
+        None
+    })
+    .await;
+    assert_eq!(
+        seen,
+        [
+            format!("start {}", first.0),
+            format!("done {}", first.0),
+            format!("start {}", second.0),
+            format!("done {}", second.0),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn stopping_a_queue_pauses_it_and_a_hand_paused_download_stays_paused() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+    let night = engine.add_queue("Night");
+    let a = engine.add(new_download(
+        root.path(),
+        format!("{base}/slower/a.bin"),
+        false,
+    ));
+    let b = engine.add(new_download(
+        root.path(),
+        format!("{base}/slower/b.bin"),
+        false,
+    ));
+    engine.enqueue(night, vec![a, b]);
+    let mut queue = wait_for_queue(&mut events, night, |q| q.downloads.len() == 2).await;
+    queue.max_concurrent = 2;
+    engine.save_queue(queue);
+    engine.start_queue(night);
+
+    wait_for_bytes(&mut events, a, 20_000).await;
+    // Paused by hand: the running queue leaves it alone.
+    engine.pause(a);
+    wait_for_state(&mut events, a, |s| *s == DownloadState::Paused).await;
+    wait_for_bytes(&mut events, b, 20_000).await;
+    engine.stop_queue(night);
+    wait_for(&mut events, |e| {
+        (*e == EngineEvent::QueueRunning(night, false)).then_some(())
+    })
+    .await;
+    wait_for_state(&mut events, b, |s| *s == DownloadState::Paused).await;
+
+    // Starting it again runs both, the hand-paused one too, and finishes.
+    engine.start_queue(night);
+    wait_for(&mut events, |e| {
+        (*e == EngineEvent::QueueFinished(night)).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn downloads_move_between_queues_and_leave_them_when_deleted() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+    let id = engine.add(new_download(
+        root.path(),
+        format!("{base}/files/a.bin"),
+        false,
+    ));
+    engine.enqueue(QueueId::MAIN, vec![id]);
+    let other = engine.add_queue("Other");
+    engine.enqueue(other, vec![id]);
+    wait_for_queue(&mut events, QueueId::MAIN, |q| q.downloads.is_empty()).await;
+    wait_for_queue(&mut events, other, |q| q.downloads == [id]).await;
+
+    engine.delete(id, false);
+    wait_for_queue(&mut events, other, |q| q.downloads.is_empty()).await;
+    engine.delete_queue(other);
+    wait_for(&mut events, |e| {
+        (*e == EngineEvent::QueueRemoved(other)).then_some(())
+    })
+    .await;
+
+    // The main queue always exists and can't be deleted.
+    engine.delete_queue(QueueId::MAIN);
+    engine.resync();
+    let main = wait_for_queue(&mut events, QueueId::MAIN, |_| true).await;
+    assert_eq!(main.name, "Main download queue");
 }

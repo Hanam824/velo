@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use velo_core::{
-    Download, DownloadId, DownloadState, EngineEvent, Segment, SegmentId, SegmentState,
+    Download, DownloadId, DownloadState, EngineEvent, Queue, QueueId, Schedule, Segment, SegmentId,
+    SegmentState, TimeOfDay,
 };
 
 use crate::{Error, Result};
@@ -37,6 +38,23 @@ const MIGRATIONS: &[&str] = &[
         downloaded INTEGER NOT NULL,
         state TEXT NOT NULL,
         PRIMARY KEY (download_id, id)
+    );",
+    // 2: queues, their schedules and their downloads in order.
+    "CREATE TABLE queues (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        max_concurrent INTEGER NOT NULL,
+        start_at TEXT,
+        days INTEGER NOT NULL,
+        stop_at TEXT,
+        exit_when_done INTEGER NOT NULL,
+        shutdown_when_done INTEGER NOT NULL
+    );
+    CREATE TABLE queue_items (
+        queue_id INTEGER NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        download_id INTEGER NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+        PRIMARY KEY (queue_id, position)
     );",
 ];
 
@@ -150,8 +168,105 @@ impl Store {
                 self.save_download(download)
             }
             EngineEvent::Removed(id) => self.delete_download(*id),
-            EngineEvent::Progress(_) => Ok(()),
+            EngineEvent::QueueChanged(queue) => self.save_queue(queue),
+            EngineEvent::QueueRemoved(id) => self.delete_queue(*id),
+            EngineEvent::Progress(_)
+            | EngineEvent::QueueRunning(..)
+            | EngineEvent::QueueFinished(_) => Ok(()),
         }
+    }
+
+    /// Loads every queue with its downloads in order, by id.
+    pub fn load_queues(&self) -> Result<Vec<Queue>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, max_concurrent, start_at, days, stop_at, exit_when_done,
+                    shutdown_when_done
+             FROM queues ORDER BY id",
+        )?;
+        let mut queues = statement
+            .query_map([], |row| {
+                let days: i64 = row.get(4)?;
+                let time = |text: Option<String>| text.as_deref().and_then(TimeOfDay::parse);
+                Ok(Queue {
+                    id: QueueId(row.get(0)?),
+                    name: row.get(1)?,
+                    max_concurrent: row.get(2)?,
+                    downloads: Vec::new(),
+                    schedule: Schedule {
+                        start_at: time(row.get(3)?),
+                        days: std::array::from_fn(|i| days & (1 << i) != 0),
+                        stop_at: time(row.get(5)?),
+                        exit_when_done: row.get(6)?,
+                        shutdown_when_done: row.get(7)?,
+                    },
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut items = self
+            .connection
+            .prepare("SELECT download_id FROM queue_items WHERE queue_id = ?1 ORDER BY position")?;
+        for queue in &mut queues {
+            queue.downloads = items
+                .query_map([queue.id.0], |row| {
+                    Ok(DownloadId(row.get::<_, i64>(0)? as u64))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+        }
+        Ok(queues)
+    }
+
+    /// Saves `queue` and replaces its list of downloads; ids of downloads that aren't stored
+    /// are left out.
+    pub fn save_queue(&mut self, queue: &Queue) -> Result<()> {
+        let schedule = &queue.schedule;
+        let days: i64 = schedule
+            .days
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .map(|(i, _)| 1 << i)
+            .sum();
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO queues
+                (id, name, max_concurrent, start_at, days, stop_at, exit_when_done,
+                 shutdown_when_done)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (id) DO UPDATE SET
+                name = excluded.name, max_concurrent = excluded.max_concurrent,
+                start_at = excluded.start_at, days = excluded.days, stop_at = excluded.stop_at,
+                exit_when_done = excluded.exit_when_done,
+                shutdown_when_done = excluded.shutdown_when_done",
+            params![
+                queue.id.0,
+                queue.name,
+                queue.max_concurrent,
+                schedule.start_at.map(|t| t.to_string()),
+                days,
+                schedule.stop_at.map(|t| t.to_string()),
+                schedule.exit_when_done,
+                schedule.shutdown_when_done,
+            ],
+        )?;
+        transaction.execute("DELETE FROM queue_items WHERE queue_id = ?1", [queue.id.0])?;
+        {
+            let mut insert = transaction.prepare(
+                "INSERT INTO queue_items (queue_id, position, download_id)
+                 SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM downloads WHERE id = ?3)",
+            )?;
+            for (position, id) in queue.downloads.iter().enumerate() {
+                insert.execute(params![queue.id.0, position as i64, id.0 as i64])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Deletes queue `id`; its downloads stay.
+    pub fn delete_queue(&mut self, id: QueueId) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM queues WHERE id = ?1", [id.0])?;
+        Ok(())
     }
 
     /// Whether download `id` is stored.
@@ -176,10 +291,19 @@ fn write_download(transaction: &Transaction<'_>, download: &Download) -> Result<
         .ok_or_else(|| Error::NonUtf8Path(download.save_dir.clone()))?;
     let (state, error) = state_to(&download.state);
     transaction.execute(
-        "INSERT OR REPLACE INTO downloads
+        // An upsert, not INSERT OR REPLACE: replacing deletes the row first, which would cascade
+        // to the download's place in its queues.
+        "INSERT INTO downloads
             (id, url, file_name, save_dir, total_size, resumable, etag, last_modified,
              category, description, state, error, added_at, last_try_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         ON CONFLICT (id) DO UPDATE SET
+            url = excluded.url, file_name = excluded.file_name, save_dir = excluded.save_dir,
+            total_size = excluded.total_size, resumable = excluded.resumable,
+            etag = excluded.etag, last_modified = excluded.last_modified,
+            category = excluded.category, description = excluded.description,
+            state = excluded.state, error = excluded.error, added_at = excluded.added_at,
+            last_try_at = excluded.last_try_at",
         params![
             download.id.0 as i64,
             download.url,
@@ -197,7 +321,10 @@ fn write_download(transaction: &Transaction<'_>, download: &Download) -> Result<
             download.last_try_at,
         ],
     )?;
-    // REPLACE on the parent row cascades to its segments, so these are all new.
+    transaction.execute(
+        "DELETE FROM segments WHERE download_id = ?1",
+        [download.id.0 as i64],
+    )?;
     let mut insert = transaction.prepare(
         "INSERT INTO segments (download_id, id, start_offset, end_offset, downloaded, state)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -375,6 +502,56 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM segments", [], |row| row.get(0))
             .unwrap();
         assert_eq!(segments, 0);
+    }
+
+    #[test]
+    fn queues_round_trip_and_keep_their_downloads_when_those_are_saved_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("velo.db")).unwrap();
+        store.save_download(&sample(1)).unwrap();
+        store.save_download(&sample(2)).unwrap();
+        let mut queue = Queue::new(QueueId(3), "Night");
+        queue.max_concurrent = 2;
+        queue.downloads = vec![DownloadId(2), DownloadId(1)];
+        queue.schedule = Schedule {
+            start_at: TimeOfDay::new(1, 30),
+            days: [true, false, true, false, true, false, false],
+            stop_at: TimeOfDay::new(6, 0),
+            exit_when_done: false,
+            shutdown_when_done: true,
+        };
+        store
+            .apply(&EngineEvent::QueueChanged(queue.clone()))
+            .unwrap();
+        // Saving a download again must not drop it from the queue.
+        store.save_download(&sample(1)).unwrap();
+        assert_eq!(store.load_queues().unwrap(), vec![queue.clone()]);
+
+        // A deleted download leaves the queue; a deleted queue leaves its downloads.
+        store.delete_download(DownloadId(2)).unwrap();
+        assert_eq!(store.load_queues().unwrap()[0].downloads, [DownloadId(1)]);
+        store.apply(&EngineEvent::QueueRemoved(queue.id)).unwrap();
+        assert!(store.load_queues().unwrap().is_empty());
+        assert_eq!(store.load_downloads().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_version_one_database_gains_queues() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("velo.db");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(MIGRATIONS[0]).unwrap();
+            connection.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let mut store = Store::open(&path).unwrap();
+        store.save_download(&sample(1)).unwrap();
+        assert!(store.load_queues().unwrap().is_empty());
+        let version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
     }
 
     #[test]

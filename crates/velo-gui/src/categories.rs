@@ -20,8 +20,8 @@ pub struct CategoryTree {
 }
 
 impl CategoryTree {
-    /// Builds the tree for `categories`.
-    pub fn new(categories: &[Category]) -> Self {
+    /// Builds the tree for `categories` and `queues`.
+    pub fn new(categories: &[Category], queues: &[Queue]) -> Self {
         let mut rows = Vec::new();
         for (key, label, icon) in [
             ("all", "All Downloads", CategoryIcon::All),
@@ -34,26 +34,27 @@ impl CategoryTree {
                 rows.push(row(&category.name, CategoryIcon::Folder, 1, key, false));
             }
         }
-        let main = Queue::main();
         rows.push(row(
             "Queues",
             CategoryIcon::Queues,
             0,
             "queues".into(),
-            true,
+            !queues.is_empty(),
         ));
-        let key = format!("queue/{}", main.id.0);
-        rows.push(row(&main.name, CategoryIcon::Queue, 1, key, false));
+        for queue in queues {
+            let key = format!("queue/{}", queue.id.0);
+            rows.push(row(&queue.name, CategoryIcon::Queue, 1, key, false));
+        }
         Self {
             rows,
             collapsed: HashSet::from(["unfinished".into(), "finished".into()]),
         }
     }
 
-    /// Rebuilds the rows for `categories`, keeping which groups are collapsed.
-    pub fn rebuild(&mut self, categories: &[Category]) {
+    /// Rebuilds the rows for `categories` and `queues`, keeping which groups are collapsed.
+    pub fn rebuild(&mut self, categories: &[Category], queues: &[Queue]) {
         let collapsed = std::mem::take(&mut self.collapsed);
-        *self = Self::new(categories);
+        *self = Self::new(categories, queues);
         self.collapsed = collapsed;
     }
 
@@ -116,7 +117,7 @@ mod tests {
 
     #[test]
     fn unfinished_and_finished_start_collapsed() {
-        let tree = CategoryTree::new(&Category::defaults());
+        let tree = CategoryTree::new(&Category::defaults(), &[Queue::main()]);
         let visible = tree.visible();
         assert_eq!(
             keys(&visible),
@@ -140,7 +141,7 @@ mod tests {
 
     #[test]
     fn toggling_shows_and_hides_children() {
-        let mut tree = CategoryTree::new(&Category::defaults());
+        let mut tree = CategoryTree::new(&Category::defaults(), &[Queue::main()]);
         tree.toggle("finished");
         tree.toggle("all");
         let visible = tree.visible();

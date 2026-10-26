@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Download, DownloadId, Segment};
+use crate::{Download, DownloadId, Queue, QueueId, Segment};
 
 /// Something that happened in the download engine.
 ///
@@ -19,6 +19,14 @@ pub enum EngineEvent {
     Removed(DownloadId),
     /// A running download's live progress.
     Progress(ProgressUpdate),
+    /// A queue was added, or its downloads, settings or schedule changed.
+    QueueChanged(Queue),
+    /// A queue was deleted.
+    QueueRemoved(QueueId),
+    /// A queue started (`true`) or stopped (`false`), by hand or by its schedule.
+    QueueRunning(QueueId, bool),
+    /// A started queue ran out of downloads to start and has none running.
+    QueueFinished(QueueId),
 }
 
 /// Live progress of a running download.

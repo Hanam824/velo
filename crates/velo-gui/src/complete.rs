@@ -94,6 +94,17 @@ impl Completion {
         }
     }
 
+    /// Reacts to `queue` having finished, as its schedule says.
+    pub fn queue_finished(self: &Rc<Self>, queue: &velo_core::Queue) {
+        if queue.schedule.shutdown_when_done {
+            if let Err(error) = self.start_countdown() {
+                eprintln!("velo: couldn't start the shutdown countdown: {error}");
+            }
+        } else if queue.schedule.exit_when_done {
+            self.desktop.quit();
+        }
+    }
+
     /// Shows the Download complete dialog for `download`.
     fn show(self: &Rc<Self>, download: &Download) -> Result<(), slint::PlatformError> {
         let window = CompleteWindow::new()?;

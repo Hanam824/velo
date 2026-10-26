@@ -4,7 +4,7 @@
 import { Button, CheckBox, VerticalBox } from "std-widgets.slint";
 import { AboutPanel } from "about.slint";
 import { CategoriesPane, CategoryItem } from "categories.slint";
-import { DownloadList, DownloadRow } from "download-list.slint";
+import { DownloadList, DownloadRow, QueueChoice } from "download-list.slint";
 import { StatusBar } from "status-bar.slint";
 import { Appearance, Theme } from "theme.slint";
 import { Toolbar } from "toolbar.slint";
@@ -47,6 +47,9 @@ export component AppWindow inherits Window {
     in property <bool> can-stop-all;
     in property <bool> can-delete;
     in property <bool> can-delete-completed;
+    in property <bool> can-start-queue;
+    in property <bool> can-stop-queue;
+    in property <[QueueChoice]> queue-choices;
 
     callback add-url();
     callback resume();
@@ -73,6 +76,11 @@ export component AppWindow inherits Window {
     callback delete-confirmed(id: int, delete-file: bool);
     callback appearance-changed(appearance: Appearance);
     callback options();
+    callback scheduler();
+    callback start-queue();
+    callback stop-queue();
+    callback enqueue(id: int, queue: int);
+    callback dequeue(id: int);
     callback quit();
 
     private property <length> categories-width: 200px;
@@ -123,6 +131,21 @@ export component AppWindow inherits Window {
                 title: "Delete All Completed";
                 enabled: root.can-delete-completed;
                 activated => { root.delete-completed(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Scheduler…";
+                activated => { root.scheduler(); }
+            }
+            MenuItem {
+                title: "Start Queue";
+                enabled: root.can-start-queue;
+                activated => { root.start-queue(); }
+            }
+            MenuItem {
+                title: "Stop Queue";
+                enabled: root.can-stop-queue;
+                activated => { root.stop-queue(); }
             }
             MenuSeparator { }
             MenuItem {
@@ -247,6 +270,8 @@ export component AppWindow inherits Window {
             can-stop-all: root.can-stop-all;
             can-delete: root.can-delete;
             can-delete-completed: root.can-delete-completed;
+            can-start-queue: root.can-start-queue;
+            can-stop-queue: root.can-stop-queue;
             add-url => { root.add-url(); }
             resume => { root.resume(); }
             stop => { root.stop(); }
@@ -254,6 +279,9 @@ export component AppWindow inherits Window {
             delete => { root.delete(); }
             delete-completed => { root.delete-completed(); }
             options => { root.options(); }
+            scheduler => { root.scheduler(); }
+            start-queue => { root.start-queue(); }
+            stop-queue => { root.stop-queue(); }
         }
 
         HorizontalLayout {
@@ -280,6 +308,9 @@ export component AppWindow inherits Window {
             DownloadList {
                 horizontal-stretch: 1;
                 rows: root.downloads;
+                queue-choices: root.queue-choices;
+                enqueue(id, queue) => { root.enqueue(id, queue); }
+                dequeue(id) => { root.dequeue(id); }
                 selected-id <=> root.selected-id;
                 sort-column: root.sort-column;
                 sort-ascending: root.sort-ascending;

@@ -4,7 +4,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use velo_core::{Category, Download, DownloadId, DownloadState, ProgressUpdate};
+use velo_core::{Category, Download, DownloadId, DownloadState, ProgressUpdate, Queue, QueueId};
 
 use crate::{DownloadRow, FileKind, format};
 
@@ -85,15 +85,18 @@ impl Filter {
         }
     }
 
-    /// Whether `download` passes the filter. Queue membership comes with the queues (D19);
-    /// until then the queue rows are empty.
-    pub fn accepts(&self, download: &Download) -> bool {
+    /// Whether `download`, which is in queue `queue` if any, passes the filter.
+    pub fn accepts(&self, download: &Download, queue: Option<QueueId>) -> bool {
         self.finished.is_none_or(|f| download.is_finished() == f)
             && self
                 .category
                 .as_ref()
                 .is_none_or(|c| download.category.as_ref() == Some(c))
-            && self.queue.is_none()
+            && match self.queue {
+                None => true,
+                Some(None) => queue.is_some(),
+                Some(Some(id)) => queue == Some(QueueId(id)),
+            }
     }
 }
 
@@ -105,6 +108,8 @@ pub struct DownloadTable {
     sort: Column,
     ascending: bool,
     filter: Filter,
+    /// Each queued download's queue and its place in it, from 0.
+    queued: HashMap<DownloadId, (QueueId, usize)>,
 }
 
 impl Default for DownloadTable {
@@ -115,6 +120,7 @@ impl Default for DownloadTable {
             sort: Column::LastTry,
             ascending: false,
             filter: Filter::default(),
+            queued: HashMap::new(),
         }
     }
 }
@@ -154,6 +160,29 @@ impl DownloadTable {
         &self.downloads
     }
 
+    /// Takes the queues' membership, for the Q column and the queue filters.
+    pub fn set_queues<'a>(&mut self, queues: impl IntoIterator<Item = &'a Queue>) {
+        self.queued = queues
+            .into_iter()
+            .flat_map(|q| {
+                q.downloads
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, d)| (*d, (q.id, i)))
+            })
+            .collect();
+    }
+
+    /// The queue download `id` is in, if any.
+    pub fn queue_of(&self, id: DownloadId) -> Option<QueueId> {
+        self.queued.get(&id).map(|(queue, _)| *queue)
+    }
+
+    /// Whether `download` passes the filter.
+    fn shown(&self, download: &Download) -> bool {
+        self.filter.accepts(download, self.queue_of(download.id))
+    }
+
     /// Shows only the downloads `filter` accepts.
     pub fn set_filter(&mut self, filter: Filter) {
         self.filter = filter;
@@ -161,15 +190,12 @@ impl DownloadTable {
 
     /// Whether download `id` exists and passes the filter.
     pub fn is_visible(&self, id: DownloadId) -> bool {
-        self.get(id).is_some_and(|d| self.filter.accepts(d))
+        self.get(id).is_some_and(|d| self.shown(d))
     }
 
     /// How many downloads pass the filter.
     pub fn visible_count(&self) -> usize {
-        self.downloads
-            .iter()
-            .filter(|d| self.filter.accepts(d))
-            .count()
+        self.downloads.iter().filter(|d| self.shown(d)).count()
     }
 
     /// The column the rows are sorted by, and whether ascending.
@@ -189,11 +215,7 @@ impl DownloadTable {
 
     /// The downloads in display order.
     fn sorted(&self) -> Vec<&Download> {
-        let mut sorted: Vec<&Download> = self
-            .downloads
-            .iter()
-            .filter(|d| self.filter.accepts(d))
-            .collect();
+        let mut sorted: Vec<&Download> = self.downloads.iter().filter(|d| self.shown(d)).collect();
         sorted.sort_by(|a, b| {
             let order = self.compare(a, b).then(a.id.cmp(&b.id));
             if self.ascending {
@@ -209,7 +231,10 @@ impl DownloadTable {
     fn compare(&self, a: &Download, b: &Download) -> Ordering {
         match self.sort {
             Column::Name => a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()),
-            Column::Queue => Ordering::Equal,
+            Column::Queue => {
+                let place = |d: &Download| self.queued.get(&d.id).map(|(q, i)| (q.0, *i));
+                place(a).cmp(&place(b))
+            }
             Column::Size => a.total_size.cmp(&b.total_size),
             Column::Status => self.fraction(a).total_cmp(&self.fraction(b)),
             Column::TimeLeft => self.time_left(a).cmp(&self.time_left(b)),
@@ -300,7 +325,12 @@ impl DownloadTable {
             id: download.id.0 as i32,
             name: download.file_name.as_str().into(),
             kind: file_kind(&download.file_name),
-            queue: Default::default(),
+            queue: self
+                .queued
+                .get(&download.id)
+                .map(|(_, place)| (place + 1).to_string())
+                .unwrap_or_default()
+                .into(),
             size: download
                 .total_size
                 .map(format::size)
@@ -495,6 +525,25 @@ pub mod tests {
         assert_eq!(shown(&mut table, "finished"), ["a.mkv"]);
         assert_eq!(shown(&mut table, "finished/Music"), Vec::<String>::new());
         assert_eq!(shown(&mut table, "queue/0"), Vec::<String>::new());
+        let mut main = Queue::main();
+        main.downloads = vec![DownloadId(3), DownloadId(1)];
+        table.set_queues([&main]);
+        assert_eq!(shown(&mut table, "queue/0"), ["a.mkv", "c.dat"]);
+        assert_eq!(shown(&mut table, "queues"), ["a.mkv", "c.dat"]);
+        assert_eq!(shown(&mut table, "queue/7"), Vec::<String>::new());
+        table.set_filter(Filter::default());
+        let rows = table.rows();
+        let q = |name: &str| {
+            rows.iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .queue
+                .to_string()
+        };
+        assert_eq!(
+            (q("c.dat"), q("a.mkv"), q("b.mp3")),
+            ("1".into(), "2".into(), String::new())
+        );
         table.set_filter(Filter::from_key("unfinished/Music"));
         assert_eq!(table.visible_count(), 1);
         assert!(table.is_visible(DownloadId(2)) && !table.is_visible(DownloadId(1)));
