@@ -76,6 +76,7 @@ impl PropertiesDialogs {
                         .filter(|_| editable),
                     url: changed(window.get_url(), &original.url).filter(|_| editable),
                     description: changed(window.get_description(), &original.description),
+                    category: None,
                 },
             );
             let _ = window.hide();

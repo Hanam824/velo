@@ -1,0 +1,93 @@
+// Adding or editing a category: its name, the file extensions it covers and its folder.
+
+import { Button, GridBox, LineEdit, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component CategoryWindow inherits Window {
+    in-out property <string> name;
+    // Extensions separated by spaces, such as "mp4 mkv avi".
+    in-out property <string> extensions;
+    in-out property <string> folder;
+    in property <string> default-folder;
+    in property <string> error;
+
+    callback browse();
+    callback accepted();
+    callback cancelled();
+
+    title: "Category";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 480px;
+    min-width: 380px;
+    background: Theme.window;
+
+    VerticalBox {
+        alignment: start;
+        GridBox {
+            padding: 0;
+            Row {
+                Text {
+                    text: "Name:";
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.name;
+                }
+            }
+            Row {
+                Text {
+                    text: "Extensions:";
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.extensions;
+                    placeholder-text: "mp4 mkv avi";
+                }
+            }
+            Row {
+                Text {
+                    text: "Folder:";
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                HorizontalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+                    LineEdit {
+                        text <=> root.folder;
+                        placeholder-text: root.default-folder;
+                    }
+                    Button {
+                        text: "…";
+                        clicked => { root.browse(); }
+                    }
+                }
+            }
+        }
+        if root.error != "": Text {
+            text: root.error;
+            wrap: word-wrap;
+            color: Theme.danger;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "OK";
+                primary: true;
+                clicked => { root.accepted(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancelled(); }
+            }
+        }
+    }
+}

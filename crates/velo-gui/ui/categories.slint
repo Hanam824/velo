@@ -28,6 +28,9 @@ export component CategoriesPane inherits Rectangle {
     // Key of the selected row.
     in-out property <string> selected: "all";
     callback selected-changed(key: string);
+    callback add-category();
+    callback edit-category(key: string);
+    callback delete-category(key: string);
     // The chevron of the row with `key` was clicked.
     callback toggle-expanded(key: string);
 
@@ -72,8 +75,27 @@ export component CategoriesPane inherits Rectangle {
             }
         }
         ListView {
-            for item in root.items: Rectangle {
+            for item in root.items: ContextMenuArea {
                 height: 24px;
+                Menu {
+                    MenuItem {
+                        title: "Add Category…";
+                        activated => { root.add-category(); }
+                    }
+                    MenuItem {
+                        title: "Edit Category…";
+                        enabled: item.icon == CategoryIcon.folder;
+                        activated => { root.edit-category(item.key); }
+                    }
+                    MenuItem {
+                        title: "Delete Category";
+                        enabled: item.icon == CategoryIcon.folder;
+                        activated => { root.delete-category(item.key); }
+                    }
+                }
+                Rectangle {
+                width: parent.width;
+                height: parent.height;
                 background: item.key == root.selected ? Theme.selection
                     : touch.has-hover ? Theme.hover : transparent;
                 accessible-role: list-item;
@@ -116,6 +138,7 @@ export component CategoriesPane inherits Rectangle {
                         color: Theme.text;
                     }
                 }
+            }
             }
         }
     }

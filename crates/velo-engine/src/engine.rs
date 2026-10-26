@@ -89,6 +89,8 @@ pub struct DownloadEdit {
     pub url: Option<String>,
     /// A new description; any time.
     pub description: Option<String>,
+    /// A new category, or `Some(None)` for none; any time.
+    pub category: Option<Option<String>>,
 }
 
 /// A handle to the engine task. Cloning it gives another handle to the same engine.
@@ -553,6 +555,9 @@ impl Actor {
         let settled = entry.running.is_none() && download.state != DownloadState::Complete;
         if let Some(description) = edit.description {
             download.description = description;
+        }
+        if let Some(category) = edit.category {
+            download.category = category;
         }
         if settled {
             if let Some(name) = edit

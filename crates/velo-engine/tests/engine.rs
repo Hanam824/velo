@@ -410,6 +410,7 @@ async fn properties_change_a_waiting_download_but_only_the_description_of_a_fini
             file_name: Some("../renamed?.bin".into()),
             url: Some(format!("{base}/files/data.bin")),
             description: Some("mirror".into()),
+            category: Some(Some("Programs".into())),
         },
     );
     let edited = wait_for(&mut events, |e| match e {
@@ -419,6 +420,7 @@ async fn properties_change_a_waiting_download_but_only_the_description_of_a_fini
     .await;
     assert_eq!(edited.file_name, "renamed_.bin");
     assert!(edited.url.ends_with("/files/data.bin"));
+    assert_eq!(edited.category.as_deref(), Some("Programs"));
 
     // The new address works.
     engine.resume(id);

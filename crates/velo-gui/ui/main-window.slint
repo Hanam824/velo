@@ -56,6 +56,9 @@ export component AppWindow inherits Window {
     callback delete-completed();
     callback category-selected(key: string);
     callback category-toggled(key: string);
+    callback add-category();
+    callback edit-category(key: string);
+    callback delete-category(key: string);
     callback selection-changed(id: int);
     callback download-activated(id: int);
     callback sort(column: int);
@@ -264,6 +267,9 @@ export component AppWindow inherits Window {
                     root.category-selected(key);
                 }
                 toggle-expanded(key) => { root.category-toggled(key); }
+                add-category => { root.add-category(); }
+                edit-category(key) => { root.edit-category(key); }
+                delete-category(key) => { root.delete-category(key); }
             }
             if root.show-categories: Splitter {
                 position <=> root.categories-width;
