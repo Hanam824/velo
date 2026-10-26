@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 velo-core = { path = "crates/velo-core" }
 velo-engine = { path = "crates/velo-engine" }
+velo-extract = { path = "crates/velo-extract" }
 velo-ipc = { path = "crates/velo-ipc" }
 velo-platform = { path = "crates/velo-platform" }
 velo-store = { path = "crates/velo-store" }
