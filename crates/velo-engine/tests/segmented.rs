@@ -22,6 +22,7 @@ fn options() -> Options {
         max_retries: 3,
         retry_delay: Duration::from_millis(5),
         limiters: Vec::new(),
+        max_request_size: None,
     }
 }
 
@@ -182,4 +183,44 @@ async fn merge_refuses_unfinished_downloads_and_existing_files() {
     merge(&dir, &[segment], Some(3), &save_path).await.unwrap();
     assert_eq!(fs::read(&save_path).unwrap(), b"abc");
     assert!(!dir.exists());
+}
+
+#[tokio::test]
+async fn long_ranges_are_fetched_in_capped_requests() {
+    let base = support::start().await;
+    let one_connection = Options {
+        max_connections: 1,
+        ..options()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let url = format!("{base}/capped/data.bin");
+    let uncapped = download_file(
+        &client().unwrap(),
+        &url,
+        &root.path().join("temp"),
+        DownloadId(1),
+        root.path(),
+        &one_connection,
+        &Progress::default(),
+    )
+    .await;
+    assert!(uncapped.is_err(), "the server refuses one long range");
+
+    let capped = Options {
+        max_request_size: Some(support::CAP),
+        ..one_connection
+    };
+    let root = tempfile::tempdir().unwrap();
+    let path = download_file(
+        &client().unwrap(),
+        &url,
+        &root.path().join("temp"),
+        DownloadId(2),
+        root.path(),
+        &capped,
+        &Progress::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(path).unwrap(), body());
 }

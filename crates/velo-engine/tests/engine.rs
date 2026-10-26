@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use tokio::sync::broadcast::Receiver;
 use velo_core::{
-    ConnectionLimit, Download, DownloadId, DownloadState, EngineEvent, Queue, QueueId, Settings,
+    ConnectionLimit, Download, DownloadId, DownloadState, EngineEvent, Queue, QueueId, Resolver,
+    Resolving, Settings, Source,
 };
 use velo_engine::{
     Credentials, DownloadEdit, Engine, EngineConfig, NewDownload, RequestOptions, RetryPolicy,
@@ -39,6 +40,7 @@ fn engine_with(root: &Path, settings: Settings, downloads: Vec<Download>) -> Eng
             max_retries: 1,
             delay: Duration::from_millis(5),
         },
+        resolver: None,
     };
     Engine::start(config, downloads, Vec::new()).unwrap()
 }
@@ -55,6 +57,7 @@ fn new_download(root: &Path, url: String, start: bool) -> NewDownload {
         description: String::new(),
         start,
         request: RequestOptions::default(),
+        source: None,
     }
 }
 
@@ -581,4 +584,70 @@ async fn downloads_move_between_queues_and_leave_them_when_deleted() {
     engine.resync();
     let main = wait_for_queue(&mut events, QueueId::MAIN, |_| true).await;
     assert_eq!(main.name, "Main download queue");
+}
+
+/// Hands out one address for every source, counting how often it was asked.
+#[derive(Debug)]
+struct FixedResolver {
+    url: String,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl Resolver for FixedResolver {
+    fn resolve<'a>(&'a self, _source: &'a Source) -> Resolving<'a> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let url = self.url.clone();
+        Box::pin(async move { Ok(vec![url]) })
+    }
+}
+
+#[tokio::test]
+async fn a_download_with_a_source_gets_a_fresh_address_before_it_starts() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let resolver = std::sync::Arc::new(FixedResolver {
+        url: format!("{base}/files/video.mp4"),
+        asked: Default::default(),
+    });
+    let config = EngineConfig {
+        temp_dir: root.path().join("temp"),
+        settings: settings(),
+        retry: RetryPolicy {
+            max_retries: 1,
+            delay: Duration::from_millis(5),
+        },
+        resolver: Some(resolver.clone()),
+    };
+    let resolving = Engine::start(config, Vec::new(), Vec::new()).unwrap();
+    let mut events = resolving.subscribe();
+    let source = Source::YouTube {
+        video_id: "dQw4w9WgXcQ".into(),
+        itags: vec![18],
+    };
+    let id = resolving.add(NewDownload {
+        source: Some(source.clone()),
+        ..new_download(root.path(), "https://expired.invalid/old".into(), true)
+    });
+    let done = wait_for_state(&mut events, id, |s| {
+        matches!(s, DownloadState::Complete | DownloadState::Failed(_))
+    })
+    .await;
+    assert_eq!(fs::read(finished(&done)).unwrap(), body());
+    assert_eq!(done.url, format!("{base}/files/video.mp4"));
+    assert_eq!(done.source, Some(source.clone()));
+    assert_eq!(resolver.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Without a resolver, such a download can't start.
+    let plain = engine(root.path(), Vec::new());
+    let mut events = plain.subscribe();
+    let id = plain.add(NewDownload {
+        source: Some(source),
+        ..new_download(root.path(), "https://expired.invalid/old".into(), true)
+    });
+    let failed = wait_for_state(&mut events, id, |s| matches!(s, DownloadState::Failed(_))).await;
+    assert!(
+        matches!(&failed.state, DownloadState::Failed(m) if m.contains("YouTube")),
+        "{:?}",
+        failed.state
+    );
 }

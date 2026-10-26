@@ -80,6 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| dirs.parts().to_path_buf()),
         settings: settings.clone(),
         retry: RetryPolicy::default(),
+        player_cache: dirs.data().join("player-cache"),
         store,
         downloads: downloads.clone(),
         queues,
@@ -292,13 +293,14 @@ fn handle_request(
             file_name,
             start,
             silent,
+            itag,
         } => {
             let preset = Preset {
                 save_dir,
                 file_name,
             };
             if silent {
-                adder.add_silently(url, preset, start);
+                adder.add_silently(url, preset, start, itag);
             } else if let Err(error) = adder.open_info(url, None, preset) {
                 eprintln!("velo: couldn't open Download File Info: {error}");
             }

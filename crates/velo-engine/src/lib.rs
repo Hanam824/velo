@@ -81,6 +81,9 @@ pub enum Error {
     /// Something already exists at the save path.
     #[error("{0} already exists")]
     Exists(PathBuf),
+    /// The download's current address couldn't be worked out from its source.
+    #[error("couldn't get the current address: {0}")]
+    Resolve(String),
 }
 
 /// Result with [`Error`] as the default error type.
