@@ -140,6 +140,7 @@ pub(crate) async fn run(
     result?;
 
     on_stage(Stage::Merging, download);
+    fs::create_dir_all(&download.save_dir).await?;
     download.file_name = unique_file_name(&download.save_dir, &download.file_name);
     let save_path = download.save_path();
     merge(&dir, &download.segments, probe.total_size, &save_path).await?;

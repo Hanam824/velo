@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use slint::{ComponentHandle, Model, VecModel};
 use velo_core::{DownloadId, DownloadState, EngineEvent, Settings};
-use velo_engine::Engine;
+use velo_engine::{Engine, NewDownload};
 
 use crate::categories::CategoryTree;
 use crate::list::{Column, DownloadTable};
@@ -18,6 +18,8 @@ use crate::{AppWindow, CategoryItem, DownloadRow, format};
 
 /// The engine commands the main window sends.
 pub trait Commands {
+    /// Adds a download and returns its id.
+    fn add(&self, new: NewDownload) -> DownloadId;
     /// Starts or resumes download `id`.
     fn resume(&self, id: DownloadId);
     /// Pauses download `id`.
@@ -29,6 +31,10 @@ pub trait Commands {
 }
 
 impl Commands for Engine {
+    fn add(&self, new: NewDownload) -> DownloadId {
+        Engine::add(self, new)
+    }
+
     fn resume(&self, id: DownloadId) {
         Engine::resume(self, id);
     }
@@ -49,7 +55,7 @@ impl Commands for Engine {
 /// The main window's state and the code that keeps the window in step with it.
 pub struct App {
     ui: slint::Weak<AppWindow>,
-    commands: Box<dyn Commands>,
+    commands: Rc<dyn Commands>,
     table: RefCell<DownloadTable>,
     rows: Rc<VecModel<DownloadRow>>,
     tree: RefCell<CategoryTree>,
@@ -58,7 +64,7 @@ pub struct App {
 
 impl App {
     /// Fills `ui` from `settings` and connects its callbacks, sending commands to `commands`.
-    pub fn new(ui: &AppWindow, settings: &Settings, commands: Box<dyn Commands>) -> Rc<Self> {
+    pub fn new(ui: &AppWindow, settings: &Settings, commands: Rc<dyn Commands>) -> Rc<Self> {
         let tree = CategoryTree::new(&settings.categories);
         let app = Rc::new(Self {
             ui: ui.as_weak(),
@@ -256,6 +262,18 @@ pub mod tests {
     pub struct Recorder(pub Rc<RefCell<Vec<String>>>);
 
     impl Commands for Recorder {
+        fn add(&self, new: NewDownload) -> DownloadId {
+            let user = new.credentials.map(|c| c.user).unwrap_or_default();
+            self.0.borrow_mut().push(format!(
+                "add {} {} {} {} start={} user={user}",
+                new.url,
+                new.save_dir.join(&new.file_name).display(),
+                new.category.unwrap_or_default(),
+                new.description,
+                new.start,
+            ));
+            DownloadId(99)
+        }
         fn resume(&self, id: DownloadId) {
             self.0.borrow_mut().push(format!("resume {}", id.0));
         }
@@ -276,7 +294,7 @@ pub mod tests {
         i_slint_backend_testing::init_no_event_loop();
         let ui = AppWindow::new().unwrap();
         let recorder = Recorder::default();
-        let app = App::new(&ui, &Settings::default(), Box::new(recorder.clone()));
+        let app = App::new(&ui, &Settings::default(), Rc::new(recorder.clone()));
         (ui, app, recorder)
     }
 

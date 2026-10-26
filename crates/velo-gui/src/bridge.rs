@@ -5,14 +5,19 @@
 //! leave the UI thread. A task on the runtime also writes every event to the [`Store`], so the
 //! download list survives a restart.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use tokio::sync::{broadcast, oneshot};
 use velo_core::{Download, EngineEvent};
-use velo_engine::{Engine, EngineConfig, Options};
+use velo_engine::{Credentials, Engine, EngineConfig, Options};
 use velo_store::Store;
+
+use crate::add::{ProbeDone, Prober};
 
 /// What the bridge needs to start the engine.
 pub struct BridgeConfig {
@@ -29,6 +34,7 @@ pub struct BridgeConfig {
 /// The running engine thread.
 pub struct Bridge {
     engine: Engine,
+    runtime: tokio::runtime::Handle,
     events: mpsc::Receiver<EngineEvent>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
@@ -45,6 +51,7 @@ impl Bridge {
         let (engine_tx, engine_rx) = mpsc::channel();
         let (events_tx, events) = mpsc::channel();
         let (stop, stopped) = oneshot::channel();
+        let handle = runtime.handle().clone();
         let BridgeConfig {
             temp_dir,
             options,
@@ -86,6 +93,7 @@ impl Bridge {
             .map_err(|_| std::io::Error::other("the engine thread stopped while starting"))?;
         Ok(Self {
             engine,
+            runtime: handle,
             events,
             stop: Some(stop),
             thread: Some(thread),
@@ -110,6 +118,36 @@ impl Bridge {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+thread_local! {
+    /// Probe callbacks waiting on the UI thread for their result, by ticket.
+    static WAITING: RefCell<HashMap<u64, ProbeDone>> = RefCell::default();
+}
+
+/// Numbers probe tickets.
+static NEXT_TICKET: AtomicU64 = AtomicU64::new(0);
+
+impl Prober for Bridge {
+    /// Probes on the runtime, then hands the result back to the UI thread, where `done` waits
+    /// (it can hold UI state, which can't cross threads).
+    fn probe(&self, url: String, credentials: Option<Credentials>, done: ProbeDone) {
+        let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
+        WAITING.with(|waiting| waiting.borrow_mut().insert(ticket, done));
+        self.runtime.spawn(async move {
+            let result = match velo_engine::client_for(credentials.as_ref()) {
+                Ok(client) => velo_engine::probe(&client, &url)
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(done) = WAITING.with(|waiting| waiting.borrow_mut().remove(&ticket)) {
+                    done(result);
+                }
+            });
+        });
     }
 }
 
@@ -208,6 +246,7 @@ mod tests {
             category: None,
             description: "unreachable".into(),
             start: true,
+            credentials: None,
         });
         wait_for(
             &bridge,

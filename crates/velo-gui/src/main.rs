@@ -3,9 +3,11 @@
 // No console window behind the app in Windows release builds (no-op elsewhere).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod add;
 mod app;
 mod bridge;
 mod categories;
+mod config;
 mod format;
 mod list;
 #[cfg(test)]
@@ -20,8 +22,10 @@ use velo_engine::Options;
 use velo_platform::AppDirs;
 use velo_store::Store;
 
+use crate::add::Adder;
 use crate::app::{App, Commands};
 use crate::bridge::{Bridge, BridgeConfig};
+use crate::config::Config;
 
 slint::include_modules!();
 
@@ -31,7 +35,7 @@ const UI_REFRESH: Duration = Duration::from_millis(250);
 /// Creates the main window and its state, sending engine commands to `commands`.
 fn create_window(
     settings: &Settings,
-    commands: Box<dyn Commands>,
+    commands: Rc<dyn Commands>,
 ) -> Result<(AppWindow, Rc<App>), slint::PlatformError> {
     let ui = AppWindow::new()?;
     ui.set_version(env!("CARGO_PKG_VERSION").into());
@@ -57,9 +61,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         downloads: downloads.clone(),
     })?;
 
-    let (ui, app) = create_window(&settings, Box::new(bridge.engine().clone()))?;
+    let commands: Rc<dyn Commands> = Rc::new(bridge.engine().clone());
+    let (ui, app) = create_window(&settings, commands.clone())?;
     app.apply(downloads.into_iter().map(EngineEvent::Added));
     let bridge = Rc::new(bridge);
+    let config = Rc::new(Config::new(
+        settings,
+        Some(dirs.settings()),
+        dirs.downloads().to_path_buf(),
+    ));
+    let adder = Adder::new(config, commands, bridge.clone());
+    ui.on_add_url(move || {
+        if let Err(error) = adder.open() {
+            eprintln!("velo: couldn't open Add URL: {error}");
+        }
+    });
     let timer = slint::Timer::default();
     {
         let (app, bridge) = (Rc::clone(&app), Rc::clone(&bridge));
@@ -89,8 +105,7 @@ mod tests {
     #[test]
     fn window_shows_the_version_categories_and_switches_appearance() {
         i_slint_backend_testing::init_no_event_loop();
-        let (ui, _app) =
-            create_window(&Settings::default(), Box::new(Recorder::default())).unwrap();
+        let (ui, _app) = create_window(&Settings::default(), Rc::new(Recorder::default())).unwrap();
         assert_eq!(ui.get_version(), env!("CARGO_PKG_VERSION"));
         assert_eq!(ui.get_categories().row_data(0).unwrap().key, "all");
         let rows = ui.get_categories().row_count();
@@ -116,7 +131,7 @@ mod tests {
         );
         std::fs::create_dir_all(&dir).unwrap();
         let window = snapshot::init();
-        let (ui, app) = create_window(&Settings::default(), Box::new(Recorder::default())).unwrap();
+        let (ui, app) = create_window(&Settings::default(), Rc::new(Recorder::default())).unwrap();
         let mb = 1024 * 1024;
         for download in [
             sample(
@@ -171,5 +186,30 @@ mod tests {
                 &dir.join(format!("main-{name}.png")),
             );
         }
+        ui.hide().unwrap();
+
+        let add = AddUrlDialog::new().unwrap();
+        add.set_url("https://releases.example.org/ubuntu-26.04-desktop-amd64.iso".into());
+        add.set_url_valid(true);
+        add.set_history(slint::ModelRc::new(slint::VecModel::from(vec![
+            slint::StandardListViewItem::from("https://example.org/report-q3.pdf"),
+            slint::StandardListViewItem::from("https://cdn.example.net/album.zip"),
+        ])));
+        snapshot::save(&window, &add, 520, 330, &dir.join("add-url.png"));
+        add.hide().unwrap();
+
+        let info = DownloadInfoDialog::new().unwrap();
+        info.set_url("https://releases.example.org/ubuntu-26.04-desktop-amd64.iso".into());
+        info.set_categories(slint::ModelRc::new(slint::VecModel::from(vec![
+            slint::SharedString::from("None"),
+            "Compressed".into(),
+            "Programs".into(),
+        ])));
+        info.set_category_index(2);
+        info.set_save_path("/Users/me/Downloads/ubuntu-26.04-desktop-amd64.iso".into());
+        info.set_size("5.96 GB".into());
+        info.set_kind(FileKind::Program);
+        info.set_probing(false);
+        snapshot::save(&window, &info, 600, 260, &dir.join("download-info.png"));
     }
 }

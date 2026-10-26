@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::sync::broadcast::Receiver;
 use velo_core::{Download, DownloadId, DownloadState, EngineEvent};
-use velo_engine::{Engine, EngineConfig, NewDownload, Options, client};
+use velo_engine::{Credentials, Engine, EngineConfig, NewDownload, Options, client};
 
 use support::{SIZE, body, versioned_body};
 
@@ -38,6 +38,7 @@ fn new_download(root: &Path, url: String, start: bool) -> NewDownload {
         category: None,
         description: String::new(),
         start,
+        credentials: None,
     }
 }
 
@@ -240,4 +241,37 @@ async fn a_download_for_later_waits_and_finishes_under_a_free_name() {
         fs::read(root.path().join("save").join("data.bin")).unwrap(),
         b"someone else's file"
     );
+}
+
+#[tokio::test]
+async fn credentials_given_when_adding_are_sent_to_the_server() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+
+    let without = engine.add(new_download(
+        root.path(),
+        format!("{base}/auth/data.bin"),
+        true,
+    ));
+    let failed = wait_for_state(&mut events, without, |s| {
+        matches!(s, DownloadState::Failed(_))
+    })
+    .await;
+    assert_eq!(
+        failed.state,
+        DownloadState::Failed("server answered 401 Unauthorized".into())
+    );
+
+    let mut new = new_download(root.path(), format!("{base}/auth/data.bin"), true);
+    new.credentials = Some(Credentials {
+        user: support::USER.into(),
+        password: support::PASSWORD.into(),
+    });
+    let with = engine.add(new);
+    let done = wait_for_state(&mut events, with, |s| *s == DownloadState::Complete).await;
+    assert!(fs::read(finished(&done)).unwrap() == body());
+    // Credentials never reach what is saved.
+    assert!(!format!("{done:?}").contains(support::PASSWORD));
 }

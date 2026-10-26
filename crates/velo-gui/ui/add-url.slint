@@ -1,0 +1,102 @@
+// The Add URL dialog: the address to download, recent addresses, and an optional login.
+
+import { Button, CheckBox, GridBox, LineEdit, StandardListView, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component AddUrlDialog inherits Window {
+    in-out property <string> url;
+    // Recent addresses, newest first.
+    in property <[StandardListViewItem]> history;
+    // Whether `url` is an http or https address; Rust checks it on every edit.
+    in property <bool> url-valid;
+    in-out property <bool> use-authorization;
+    in-out property <string> user;
+    in-out property <string> password;
+
+    callback url-edited(text: string);
+    callback accepted();
+    callback cancelled();
+
+    title: "Add URL";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 520px;
+    min-width: 400px;
+    background: Theme.window;
+    forward-focus: address;
+
+    VerticalBox {
+        Text {
+            text: "Address:";
+            color: Theme.text;
+        }
+        address := LineEdit {
+            text <=> root.url;
+            placeholder-text: "https://example.com/file.zip";
+            edited(text) => { root.url-edited(text); }
+            accepted => {
+                if root.url-valid {
+                    root.accepted();
+                }
+            }
+        }
+        if root.history.length > 0: VerticalLayout {
+            spacing: 4px;
+            Text {
+                text: "Recent addresses:";
+                color: Theme.text-muted;
+            }
+            StandardListView {
+                height: 96px;
+                model: root.history;
+                current-item-changed(index) => {
+                    root.url = root.history[index].text;
+                    root.url-edited(root.url);
+                }
+            }
+        }
+        CheckBox {
+            text: "Use authorization";
+            checked <=> root.use-authorization;
+        }
+        GridBox {
+            padding: 0;
+            Row {
+                Text {
+                    text: "Login:";
+                    vertical-alignment: center;
+                    color: root.use-authorization ? Theme.text : Theme.text-disabled;
+                }
+                LineEdit {
+                    text <=> root.user;
+                    enabled: root.use-authorization;
+                }
+            }
+            Row {
+                Text {
+                    text: "Password:";
+                    vertical-alignment: center;
+                    color: root.use-authorization ? Theme.text : Theme.text-disabled;
+                }
+                LineEdit {
+                    text <=> root.password;
+                    input-type: InputType.password;
+                    enabled: root.use-authorization;
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "OK";
+                primary: true;
+                enabled: root.url-valid;
+                clicked => { root.accepted(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancelled(); }
+            }
+        }
+    }
+}

@@ -3,8 +3,10 @@
 //! Every function behaves the same on Windows, macOS and Linux; only where things live differs,
 //! following each OS's conventions.
 
+mod dialogs;
 mod dirs;
 
+pub use dialogs::pick_save_path;
 pub use dirs::AppDirs;
 
 /// Errors from OS integration.
