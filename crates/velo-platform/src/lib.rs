@@ -8,7 +8,7 @@ mod dirs;
 mod files;
 mod power;
 
-pub use dialogs::pick_save_path;
+pub use dialogs::{pick_folder, pick_save_path};
 pub use dirs::AppDirs;
 pub use files::{open, reveal};
 pub use power::shutdown;

@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
-use velo_core::DownloadId;
+use velo_core::{DownloadId, Settings};
 use velo_engine::{Credentials, NewDownload, Probe, RequestOptions, Url, unique_file_name};
 
 use crate::app::Commands;
 use crate::config::Config;
 use crate::list::file_kind;
-use crate::{AddUrlDialog, DownloadInfoDialog, format};
+use crate::{AddUrlDialog, DownloadInfoDialog, format, theme};
 
 /// The outcome of asking a server about a URL: what it said, or an error message.
 pub type ProbeResult = Result<Probe, String>;
@@ -23,9 +23,15 @@ pub type ProbeDone = Box<dyn FnOnce(ProbeResult)>;
 
 /// Asks servers about URLs off the UI thread.
 pub trait Prober {
-    /// Probes `url`, sending `credentials` if any, and calls `done` with the result on the UI
-    /// thread.
-    fn probe(&self, url: String, credentials: Option<Credentials>, done: ProbeDone);
+    /// Probes `url` with the user agent and proxy from `settings`, sending `credentials` if
+    /// any, and calls `done` with the result on the UI thread.
+    fn probe(
+        &self,
+        url: String,
+        settings: Settings,
+        credentials: Option<Credentials>,
+        done: ProbeDone,
+    );
 }
 
 /// Whether `text` is an http or https address with a host.
@@ -87,6 +93,7 @@ impl Adder {
             return dialog.show();
         }
         let dialog = AddUrlDialog::new()?;
+        theme::apply(&dialog, self.config.settings().appearance);
         let history: Vec<StandardListViewItem> = self
             .config
             .settings()
@@ -146,6 +153,7 @@ impl Adder {
         let number = self.next_info.get();
         self.next_info.set(number + 1);
         let settings = self.config.settings();
+        theme::apply(&dialog, settings.appearance);
         let names: Vec<SharedString> = std::iter::once("None".into())
             .chain(settings.categories.iter().map(|c| c.name.as_str().into()))
             .collect();
@@ -213,6 +221,7 @@ impl Adder {
         let (weak, config) = (dialog.as_weak(), self.config.clone());
         self.prober.probe(
             url,
+            settings,
             credentials,
             Box::new(move |result| {
                 if let Some(dialog) = weak.upgrade() {
@@ -337,7 +346,7 @@ mod tests {
     struct FixedProber(ProbeResult);
 
     impl Prober for FixedProber {
-        fn probe(&self, _: String, _: Option<Credentials>, done: ProbeDone) {
+        fn probe(&self, _: String, _: Settings, _: Option<Credentials>, done: ProbeDone) {
             done(self.0.clone());
         }
     }

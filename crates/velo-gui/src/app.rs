@@ -18,7 +18,7 @@ use crate::list::{Column, DownloadTable};
 use crate::progress::ProgressDialogs;
 use crate::properties::PropertiesDialogs;
 use crate::toolbar::ToolbarState;
-use crate::{AppWindow, CategoryItem, DownloadRow, format};
+use crate::{AppWindow, CategoryItem, DownloadRow, format, theme};
 
 /// The engine commands the main window sends.
 pub trait Commands {
@@ -36,6 +36,8 @@ pub trait Commands {
     fn set_speed_limit(&self, id: DownloadId, rate: Option<u64>);
     /// Changes download `id`'s details.
     fn edit(&self, id: DownloadId, edit: DownloadEdit);
+    /// Uses `settings` from now on.
+    fn set_settings(&self, settings: velo_core::Settings);
 }
 
 impl Commands for Engine {
@@ -66,6 +68,10 @@ impl Commands for Engine {
     fn edit(&self, id: DownloadId, edit: DownloadEdit) {
         Engine::edit(self, id, edit);
     }
+
+    fn set_settings(&self, settings: velo_core::Settings) {
+        Engine::set_settings(self, settings);
+    }
 }
 
 /// The main window's state and the code that keeps the window in step with it.
@@ -80,6 +86,7 @@ pub struct App {
     properties: Rc<PropertiesDialogs>,
     completion: Rc<Completion>,
     desktop: Rc<dyn Desktop>,
+    config: Rc<Config>,
 }
 
 impl App {
@@ -91,11 +98,14 @@ impl App {
         commands: Rc<dyn Commands>,
         desktop: Rc<dyn Desktop>,
     ) -> Rc<Self> {
-        let tree = CategoryTree::new(&config.settings().categories);
+        let settings = config.settings();
+        theme::apply(ui, settings.appearance);
+        let tree = CategoryTree::new(&settings.categories);
         let app = Rc::new(Self {
             ui: ui.as_weak(),
-            progress: ProgressDialogs::new(commands.clone()),
-            properties: PropertiesDialogs::new(commands.clone(), desktop.clone()),
+            progress: ProgressDialogs::new(commands.clone(), config.clone()),
+            properties: PropertiesDialogs::new(commands.clone(), desktop.clone(), config.clone()),
+            config: config.clone(),
             completion: Completion::new(config, desktop.clone()),
             desktop,
             commands,
@@ -149,6 +159,10 @@ impl App {
             }
         });
         ui.on_download_activated(on_row(self, App::show_progress));
+        ui.on_appearance_changed(with(self, |app, appearance| {
+            app.config
+                .update(|s| s.appearance = theme::from_ui(appearance));
+        }));
         ui.on_open_file(on_row(self, |app, id| {
             if let Some(path) = app.finished_file(id) {
                 app.desktop.open(&path);
@@ -382,6 +396,11 @@ pub mod tests {
                 edit.description.unwrap_or_default()
             ));
         }
+        fn set_settings(&self, settings: velo_core::Settings) {
+            self.0
+                .borrow_mut()
+                .push(format!("settings {}", settings.max_connections));
+        }
     }
 
     fn app() -> (AppWindow, Rc<App>, Recorder) {
@@ -406,6 +425,39 @@ pub mod tests {
             Rc::new(desktop.clone()),
         );
         (ui, app, recorder, desktop)
+    }
+
+    #[test]
+    fn the_saved_appearance_reaches_every_window_and_menu_changes_are_saved() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let settings = velo_core::Settings {
+            appearance: velo_core::Appearance::Dark,
+            ..velo_core::Settings::default()
+        };
+        let config = Rc::new(Config::new(settings, None, "/downloads".into()));
+        let app = App::new(
+            &ui,
+            config.clone(),
+            Rc::new(Recorder::default()),
+            Rc::new(FakeDesktop::default()),
+        );
+        assert!(ui.global::<crate::Theme>().get_dark());
+
+        // A dialog opened later is dark too.
+        app.apply([EngineEvent::Added(sample(
+            1,
+            "a.iso",
+            DownloadState::Paused,
+            1,
+            2,
+        ))]);
+        ui.invoke_download_activated(1);
+        let dialog = app.progress_window(DownloadId(1)).unwrap();
+        assert!(dialog.global::<crate::Theme>().get_dark());
+
+        ui.invoke_appearance_changed(crate::Appearance::Light);
+        assert_eq!(config.settings().appearance, velo_core::Appearance::Light);
     }
 
     #[test]

@@ -37,8 +37,6 @@ pub struct BridgeConfig {
 pub struct Bridge {
     engine: Engine,
     runtime: tokio::runtime::Handle,
-    /// The settings probes use for their client.
-    settings: Settings,
     events: mpsc::Receiver<EngineEvent>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
@@ -62,7 +60,6 @@ impl Bridge {
             store,
             downloads,
         } = config;
-        let engine_settings = settings.clone();
 
         let thread = std::thread::Builder::new()
             .name("velo-runtime".into())
@@ -70,7 +67,7 @@ impl Bridge {
                 runtime.block_on(async move {
                     let config = EngineConfig {
                         temp_dir,
-                        settings: engine_settings,
+                        settings,
                         retry,
                     };
                     let engine = match Engine::start(config, downloads) {
@@ -104,7 +101,6 @@ impl Bridge {
         Ok(Self {
             engine,
             runtime: handle,
-            settings,
             events,
             stop: Some(stop),
             thread: Some(thread),
@@ -143,14 +139,19 @@ static NEXT_TICKET: AtomicU64 = AtomicU64::new(0);
 impl Prober for Bridge {
     /// Probes on the runtime, then hands the result back to the UI thread, where `done` waits
     /// (it can hold UI state, which can't cross threads).
-    fn probe(&self, url: String, credentials: Option<Credentials>, done: ProbeDone) {
+    fn probe(
+        &self,
+        url: String,
+        settings: Settings,
+        credentials: Option<Credentials>,
+        done: ProbeDone,
+    ) {
         let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
         WAITING.with(|waiting| waiting.borrow_mut().insert(ticket, done));
         let request = RequestOptions {
             credentials,
             ..RequestOptions::default()
         };
-        let settings = self.settings.clone();
         self.runtime.spawn(async move {
             let result = match velo_engine::client_with(&settings, &request) {
                 Ok(client) => velo_engine::probe(&client, &url)

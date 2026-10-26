@@ -61,6 +61,7 @@ export component Toolbar inherits Rectangle {
     callback stop-all();
     callback delete();
     callback delete-completed();
+    callback options();
 
     background: Theme.panel;
     height: 66px;
@@ -103,6 +104,11 @@ export component Toolbar inherits Rectangle {
             label: "Delete Completed";
             enabled: root.can-delete-completed;
             clicked => { root.delete-completed(); }
+        }
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/settings.svg");
+            label: "Options";
+            clicked => { root.options(); }
         }
     }
 

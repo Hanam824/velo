@@ -69,6 +69,7 @@ export component AppWindow inherits Window {
     // The user confirmed deleting download `id`, and its finished file too if `delete-file`.
     callback delete-confirmed(id: int, delete-file: bool);
     callback appearance-changed(appearance: Appearance);
+    callback options();
     callback quit();
 
     private property <length> categories-width: 200px;
@@ -119,6 +120,11 @@ export component AppWindow inherits Window {
                 title: "Delete All Completed";
                 enabled: root.can-delete-completed;
                 activated => { root.delete-completed(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Options…";
+                activated => { root.options(); }
             }
         }
         Menu {
@@ -244,6 +250,7 @@ export component AppWindow inherits Window {
             stop-all => { root.stop-all(); }
             delete => { root.delete(); }
             delete-completed => { root.delete-completed(); }
+            options => { root.options(); }
         }
 
         HorizontalLayout {
