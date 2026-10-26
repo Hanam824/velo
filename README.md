@@ -31,6 +31,11 @@ Status: early development. See [`docs/PLAN.md`](docs/PLAN.md) for the design and
   - Import and export the list as plain text.
 - **The tray, single instance and notifications:** closing the window keeps Velo in the tray, and launching it again shows the running window.
 - **`velo-cli`:** adds downloads to the running app, or downloads on its own (see below).
+- **YouTube:** paste a video's address to pick a format. High resolutions are downloaded as separate video and sound streams and joined into one MP4 without re-encoding.
+- **Browser extensions** for Chromium browsers, Firefox and Safari (see below):
+  - Downloads of the file types Velo captures open in Velo.
+  - "Download with Velo" is added to the context menu.
+  - YouTube's player gets a Download button with a format menu.
 
 ## Install
 
@@ -62,7 +67,23 @@ velo-cli -d URL -q                                # download here, show progress
 velo-cli --help
 ```
 
+For a YouTube address, `velo-cli` takes the best format, or `--itag N` for a particular one: one stream, such as `18` or `140`.
+
 `-q` (`--headless`) prints the saved file's path on success. It exits non-zero if the download fails. Ctrl+C pauses the download, and it can be resumed later.
+
+## Browser extensions
+
+Each release also has the browser extensions. They talk to Velo through `velo-nmh`, which comes with Velo and is registered with your browsers each time Velo starts. Run Velo once before installing them.
+
+- **Chrome, Edge, Brave:** unzip `velo-<version>-extension-chromium.zip`. Open `chrome://extensions` and turn on Developer mode. Choose **Load unpacked** and pick the folder.
+- **Firefox (128+):** open `about:debugging#/runtime/this-firefox` and choose **Load Temporary Add-on…**. Pick the `manifest.json` from `velo-<version>-extension-firefox.zip`, unzipped. It lasts until Firefox restarts, until the add-on is signed by Mozilla.
+- **Safari:** unzip `velo-<version>-safari-extension-macos.zip`, move "Velo Safari Extension.app" to Applications and open it once.
+  - In Safari, turn on Settings → Advanced → **Show features for web developers**.
+  - Then turn on Develop → **Allow Unsigned Extensions**.
+  - Finally, enable Velo in Settings → Extensions.
+  - Safari has no download capture; you get the context menu and the YouTube button.
+
+See [`extension/README.md`](extension/README.md) for details and [`docs/native-messaging.md`](docs/native-messaging.md) for the protocol.
 
 ## Build from source
 

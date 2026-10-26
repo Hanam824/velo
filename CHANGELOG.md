@@ -2,6 +2,40 @@
 
 What each release of Velo Download Manager added. Nightly builds between releases are listed on the [releases page](https://github.com/Hanam824/velo/releases).
 
+## v0.2.0
+
+YouTube downloads and browser extensions.
+
+### YouTube
+
+- Paste a YouTube address (watch, shorts, embed, live or youtu.be) into Add URL to see the video's formats.
+  - The list shows video with sound, by resolution, then sound only.
+  - The best choice is selected.
+- High resolutions come as separate video and sound streams. Velo downloads both and joins them into one MP4 without re-encoding.
+  - Joining is pure Rust.
+  - If the streams can't be joined that way, Velo uses an `ffmpeg` on `PATH` when there is one.
+- Each start asks YouTube again for the stream addresses, since they expire, so YouTube downloads resume like any other.
+  - Requests are capped at 10 MiB, which YouTube serves at full speed.
+- Velo asks YouTube as several apps in turn and uses the first that answers.
+  - The web player's signature and n functions run in an embedded JavaScript engine (Boa).
+  - These follow the player's classic layout. YouTube's current, obfuscated player isn't handled yet (see the plan's backlog). Until then, Velo relies on the apps that get direct addresses.
+- `velo-cli -d <youtube address> [--itag N]` downloads videos too.
+
+### Browser extensions
+
+- An extension for Chrome, Edge, Brave and other Chromium browsers, Firefox (128+) and Safari (16.4+). It talks to the app through the new `velo-nmh` helper, which the app registers with the browsers at every start.
+  - **Download capture** (Chromium and Firefox): downloads of the file types on Velo's capture list open in Velo with their page and cookies. Hold Alt to let the browser have one. The toolbar button turns capturing off.
+  - **"Download with Velo"** in the context menu of links, images, video and audio.
+  - **On YouTube**, a Download button on the player lists the video's formats and hands the chosen one to Velo.
+- The extensions aren't in the stores yet.
+  - Chromium and Firefox: load them from the release's zips.
+  - Safari: use "Velo Safari Extension.app" with Develop → Allow Unsigned Extensions.
+
+### Also
+
+- Duplicate sound streams (YouTube's dynamic-range-compressed copies) are no longer listed.
+- A nightly check against YouTube opens an issue when extraction breaks.
+
 ## v0.1.0
 
 The first release: a segmented download manager for Windows, macOS and Linux.
