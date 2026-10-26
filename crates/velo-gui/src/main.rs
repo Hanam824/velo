@@ -161,6 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .send(message)
             .map_err(|_| "Velo is closing".to_string())
     })?;
+    register_browser_host(dirs.data());
     let tray = match VeloTray::new() {
         Ok(tray) => {
             let shown = ui.as_weak();
@@ -236,6 +237,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Tells the browsers where `velo-nmh` is, if it is next to the app, so Velo's extension can
+/// reach the app. Done at every start, so it follows the app when it moves.
+fn register_browser_host(data_dir: &std::path::Path) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let host = exe.with_file_name(format!("velo-nmh{}", std::env::consts::EXE_SUFFIX));
+    if !host.is_file() {
+        return;
+    }
+    if let Err(error) =
+        velo_platform::register_native_host(&velo_platform::NativeHost::velo(&host), data_dir)
+    {
+        eprintln!("velo: couldn't register the browser helper: {error}");
+    }
+}
+
 /// Adds every address in a list file the user picks to the main queue.
 fn import_list(adder: &Adder, config: &Config) {
     let Some(path) = velo_platform::pick_file(&config.save_dir(None), "Address lists", &["txt"])
@@ -293,14 +311,18 @@ fn handle_request(
             file_name,
             start,
             silent,
-            itag,
+            itags,
+            referer,
+            cookies,
         } => {
             let preset = Preset {
                 save_dir,
                 file_name,
+                referer,
+                cookies,
             };
             if silent {
-                adder.add_silently(url, preset, start, itag);
+                adder.add_silently(url, preset, start, itags);
             } else if let Err(error) = adder.open_info(url, None, preset) {
                 eprintln!("velo: couldn't open Download File Info: {error}");
             }

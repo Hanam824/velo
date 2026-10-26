@@ -166,7 +166,8 @@ fn a_running_app_gets_the_request_and_headless_is_refused() {
         file_name,
         start,
         silent,
-        itag,
+        itags,
+        ..
     } = received
     else {
         panic!("expected an add, got {received:?}");
@@ -176,7 +177,7 @@ fn a_running_app_gets_the_request_and_headless_is_refused() {
     assert!(save_dir.is_absolute() && save_dir.ends_with("rel"));
     assert_eq!(file_name, None);
     assert!(start && silent);
-    assert_eq!(itag, Some(22));
+    assert_eq!(itags, [22]);
     assert_eq!(
         rx.recv_timeout(Duration::from_secs(5)).unwrap(),
         Message::StartQueue { queue: None }

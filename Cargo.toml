@@ -16,6 +16,7 @@ velo-engine = { path = "crates/velo-engine" }
 velo-extract = { path = "crates/velo-extract" }
 velo-ipc = { path = "crates/velo-ipc" }
 velo-mux = { path = "crates/velo-mux" }
+velo-nmh = { path = "crates/velo-nmh" }
 velo-platform = { path = "crates/velo-platform" }
 velo-store = { path = "crates/velo-store" }
 
