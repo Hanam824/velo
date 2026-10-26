@@ -6,6 +6,7 @@
 mod category;
 mod download;
 mod event;
+pub mod format;
 mod queue;
 mod segment;
 mod settings;

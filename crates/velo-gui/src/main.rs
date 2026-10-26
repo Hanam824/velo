@@ -29,7 +29,7 @@ use velo_engine::RetryPolicy;
 use velo_platform::AppDirs;
 use velo_store::Store;
 
-use crate::add::Adder;
+use crate::add::{Adder, Preset, is_download_url};
 use crate::app::{App, Commands};
 use crate::bridge::{Bridge, BridgeConfig};
 use crate::complete::{Desktop, SystemDesktop};
@@ -125,11 +125,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     ui.on_add_url(open_add.clone());
 
-    let shown = ui.as_weak();
-    velo_ipc::listen(&endpoint, move |message| match message {
-        velo_ipc::Message::Activate => {
-            let _ = shown.upgrade_in_event_loop(|ui| show_main(&ui));
+    // Messages from other processes wait here for the UI thread, which takes them on its timer.
+    let (requests_tx, requests) = std::sync::mpsc::channel();
+    velo_ipc::listen(&endpoint, move |message| {
+        if let velo_ipc::Message::Add { url, .. } = &message
+            && !is_download_url(url)
+        {
+            return Err(format!("{url} isn't an http or https address"));
         }
+        requests_tx
+            .send(message)
+            .map_err(|_| "Velo is closing".to_string())
     })?;
     let tray = match VeloTray::new() {
         Ok(tray) => {
@@ -161,9 +167,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let timer = slint::Timer::default();
     {
-        let (app, bridge) = (Rc::clone(&app), Rc::clone(&bridge));
+        let (app, bridge, weak, adder) = (
+            Rc::clone(&app),
+            Rc::clone(&bridge),
+            ui.as_weak(),
+            adder.clone(),
+        );
         timer.start(slint::TimerMode::Repeated, UI_REFRESH, move || {
             app.apply(bridge.drain());
+            for message in requests.try_iter() {
+                if let Some(ui) = weak.upgrade() {
+                    handle_request(&ui, &adder, &*commands, message);
+                }
+            }
         });
     }
     ui.show()?;
@@ -174,6 +190,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(tray);
     bridge.shutdown();
     Ok(())
+}
+
+/// Carries out a request from another process, such as `velo-cli` or a second launch.
+fn handle_request(
+    ui: &AppWindow,
+    adder: &Rc<Adder>,
+    commands: &dyn Commands,
+    message: velo_ipc::Message,
+) {
+    match message {
+        velo_ipc::Message::Activate => show_main(ui),
+        velo_ipc::Message::Ping => {}
+        velo_ipc::Message::Add {
+            url,
+            save_dir,
+            file_name,
+            start,
+            silent,
+        } => {
+            let preset = Preset {
+                save_dir,
+                file_name,
+            };
+            if silent {
+                adder.add_silently(url, preset, start);
+            } else if let Err(error) = adder.open_info(url, None, preset) {
+                eprintln!("velo: couldn't open Download File Info: {error}");
+            }
+        }
+        velo_ipc::Message::StartQueue { queue } => {
+            commands.start_queue(queue.unwrap_or(velo_core::QueueId::MAIN));
+        }
+    }
 }
 
 /// Shows the main window, also if it was closed to the tray or minimized.
