@@ -81,12 +81,19 @@ pub(crate) struct RawFormat {
     content_length: Option<String>,
     quality_label: Option<String>,
     audio_sample_rate: Option<String>,
+    /// Whether this is a copy of a sound stream with its dynamic range compressed.
+    #[serde(default)]
+    is_drc: bool,
 }
 
 impl RawFormat {
     /// The format, as one of the formats YouTube calls `adaptive` if `adaptive`; `None` if it
     /// has neither an address nor a cipher, or an unreadable media type.
     pub(crate) fn into_format(self, adaptive: bool) -> Option<Format> {
+        // The compressed copy shares the itag of the original; offer the original only.
+        if self.is_drc {
+            return None;
+        }
         let (mime_type, codecs) = parse_mime_type(&self.mime_type)?;
         let kind = if !adaptive {
             StreamKind::Muxed

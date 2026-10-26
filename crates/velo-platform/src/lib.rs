@@ -7,6 +7,8 @@ mod clipboard;
 mod dialogs;
 mod dirs;
 mod files;
+mod launch;
+mod native_host;
 mod notify;
 mod power;
 
@@ -14,12 +16,19 @@ pub use clipboard::ClipboardWatcher;
 pub use dialogs::{pick_file, pick_folder, pick_save_path};
 pub use dirs::AppDirs;
 pub use files::{open, reveal};
+pub use launch::launch_detached;
+pub use native_host::{
+    CHROMIUM_EXTENSION_ID, FIREFOX_EXTENSION_ID, NATIVE_HOST_NAME, NativeHost, register_native_host,
+};
 pub use notify::notify;
 pub use power::shutdown;
 
 /// Errors from OS integration.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// A file couldn't be written or a program started.
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
     /// The OS doesn't say where the user's home folder is, so there is nowhere to keep data.
     #[error("couldn't find the home folder")]
     NoHome,

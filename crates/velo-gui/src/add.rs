@@ -30,15 +30,9 @@ pub type VideoDone = Box<dyn FnOnce(VideoResult)>;
 
 /// Asks servers about URLs off the UI thread.
 pub trait Prober {
-    /// Probes `url` with the user agent and proxy from `settings`, sending `credentials` if
-    /// any, and calls `done` with the result on the UI thread.
-    fn probe(
-        &self,
-        url: String,
-        settings: Settings,
-        credentials: Option<Credentials>,
-        done: ProbeDone,
-    );
+    /// Probes `url` with the user agent and proxy from `settings`, sending `request`'s login,
+    /// referer and cookies, and calls `done` with the result on the UI thread.
+    fn probe(&self, url: String, settings: Settings, request: RequestOptions, done: ProbeDone);
 
     /// Asks YouTube about the video at `url` and calls `done` with the result on the UI
     /// thread.
@@ -59,6 +53,21 @@ pub struct Preset {
     pub save_dir: Option<PathBuf>,
     /// The name to save as.
     pub file_name: Option<String>,
+    /// The page the link was on, sent as `Referer`.
+    pub referer: Option<String>,
+    /// The cookies the server set for it, sent as `Cookie`.
+    pub cookies: Option<String>,
+}
+
+impl Preset {
+    /// The headers to send for a download asked for with this preset, with `credentials`.
+    fn request(&self, credentials: Option<Credentials>) -> RequestOptions {
+        RequestOptions {
+            credentials,
+            referer: self.referer.clone(),
+            cookies: self.cookies.clone(),
+        }
+    }
 }
 
 /// What runs with a download started from Download File Info.
@@ -82,7 +91,8 @@ pub struct Adder {
 /// What a Download File Info dialog knows besides its fields.
 struct Pending {
     url: String,
-    credentials: Option<Credentials>,
+    /// The login, referer and cookies to send.
+    request: RequestOptions,
     /// The server's file name, before it is made unique in the chosen folder.
     server_name: String,
     /// Whether the user changed Save As; then a new category doesn't move the file.
@@ -188,9 +198,10 @@ impl Adder {
             .collect();
         dialog.set_categories(ModelRc::new(VecModel::from(names)));
         dialog.set_url(url.as_str().into());
+        let request = preset.request(credentials);
         let pending = Rc::new(RefCell::new(Pending {
             url: url.clone(),
-            credentials: credentials.clone(),
+            request: request.clone(),
             server_name: String::new(),
             path_edited: false,
             preset,
@@ -271,7 +282,7 @@ impl Adder {
             self.prober.probe(
                 url,
                 settings,
-                credentials,
+                request,
                 Box::new(move |result| {
                     if let Some(dialog) = weak.upgrade() {
                         probed(&dialog, &config, &mut pending.borrow_mut(), result);
@@ -286,13 +297,14 @@ impl Adder {
     /// called: into `preset`'s folder, else its category's. It starts at once with `start`, and
     /// otherwise waits in the main queue.
     ///
-    /// A YouTube address gets format `itag`, or else the best video with sound.
+    /// A YouTube address gets the formats `itags` (one stream, or video then sound), or the
+    /// best choice if empty.
     pub fn add_silently(
         self: &Rc<Self>,
         url: String,
         preset: Preset,
         start: bool,
-        itag: Option<u32>,
+        itags: Vec<u32>,
     ) {
         if velo_extract::video_id(&url).is_some() {
             let this = Rc::downgrade(self);
@@ -300,7 +312,7 @@ impl Adder {
                 url,
                 Box::new(move |result| {
                     if let Some(this) = this.upgrade() {
-                        this.add_video(result, preset, start, itag);
+                        this.add_video(result, preset, start, &itags);
                     }
                 }),
             );
@@ -310,7 +322,7 @@ impl Adder {
         self.prober.probe(
             url.clone(),
             self.config.settings(),
-            None,
+            preset.request(None),
             Box::new(move |result| {
                 let Some(this) = this.upgrade() else { return };
                 // If the server didn't answer, the engine tries again and shows the error.
@@ -321,6 +333,7 @@ impl Adder {
                     .save_dir
                     .clone()
                     .unwrap_or_else(|| this.config.save_dir(category.as_deref()));
+                let request = preset.request(None);
                 let id = this.commands.add(NewDownload {
                     url,
                     file_name: preset.file_name.unwrap_or_default(),
@@ -328,7 +341,7 @@ impl Adder {
                     category,
                     description: String::new(),
                     start,
-                    request: RequestOptions::default(),
+                    request,
                     source: None,
                 });
                 if !start {
@@ -338,9 +351,9 @@ impl Adder {
         );
     }
 
-    /// Adds format `itag` (or the best choice) of the video in `result` without asking; a
-    /// video that can't be had is reported.
-    fn add_video(&self, result: VideoResult, preset: Preset, start: bool, itag: Option<u32>) {
+    /// Adds formats `itags` (or the best choice, if empty) of the video in `result` without
+    /// asking; a video that can't be had is reported.
+    fn add_video(&self, result: VideoResult, preset: Preset, start: bool, itags: &[u32]) {
         let video = match result {
             Ok(video) => video,
             Err(error) => {
@@ -348,9 +361,10 @@ impl Adder {
                 return;
             }
         };
-        let choice = match itag {
-            Some(itag) => video.choice(&[itag]),
-            None => video.choices().first().copied(),
+        let choice = if itags.is_empty() {
+            video.choices().first().copied()
+        } else {
+            video.choice(itags)
         };
         let Some(choice) = choice else {
             eprintln!("velo: YouTube doesn't offer that format of {}", video.id);
@@ -372,7 +386,7 @@ impl Adder {
             category,
             description: video.title.clone(),
             start,
-            request: RequestOptions::default(),
+            request: preset.request(None),
             source: Some(Source::YouTube {
                 video_id: video.id.clone(),
                 itags: choice.itags(),
@@ -442,10 +456,7 @@ impl Adder {
             category,
             description: dialog.get_description().into(),
             start,
-            request: RequestOptions {
-                credentials: pending.credentials.clone(),
-                ..RequestOptions::default()
-            },
+            request: pending.request.clone(),
             source,
         });
         if start && let Some(on_started) = self.on_started.borrow().as_ref() {
@@ -519,7 +530,7 @@ fn video_found(
         return dialog
             .set_error("YouTube offers no format of this video that Velo can download.".into());
     }
-    let labels: Vec<SharedString> = choices.iter().map(|c| choice_label(c).into()).collect();
+    let labels: Vec<SharedString> = choices.iter().map(|c| c.label().into()).collect();
     let itags = choices.iter().map(Choice::itags).collect();
     dialog.set_formats(ModelRc::new(VecModel::from(labels)));
     dialog.set_format_index(0);
@@ -539,34 +550,6 @@ fn show_format(dialog: &DownloadInfoDialog, config: &Config, pending: &mut Pendi
     let (name, size) = (video.file_name(&choice), choice.size());
     pending.server_name = name;
     show_file(dialog, config, pending, size);
-}
-
-/// How a choice is listed: `1080p MP4, video and sound joined, 95.21 MB`,
-/// `360p MP4, video with sound, 12.70 MB` or `Sound only, M4A 128 kbps, 3.27 MB`.
-fn choice_label(choice: &Choice<'_>) -> String {
-    let size = choice
-        .size()
-        .map(|n| format!(", {}", format::size(n)))
-        .unwrap_or_default();
-    let extension = choice.extension().to_uppercase();
-    let first = choice.formats()[0];
-    if choice.is_audio_only() {
-        let kbps = first.bitrate.unwrap_or_default() / 1000;
-        return format!("Sound only, {extension} {kbps} kbps{size}");
-    }
-    let quality = first
-        .quality_label
-        .clone()
-        .or_else(|| first.height.map(|h| format!("{h}p")))
-        .unwrap_or_else(|| format!("itag {}", first.itag));
-    let how = match choice {
-        Choice::Joined { video, .. } if !video.codecs.iter().any(|c| c.starts_with("avc1")) => {
-            "video and sound joined, not H.264"
-        }
-        Choice::Joined { .. } => "video and sound joined",
-        Choice::Single(_) => "video with sound",
-    };
-    format!("{quality} {extension}, {how}{size}")
 }
 
 /// Shows the file the dialog is about: its category, type, size (`None` if unknown) and save
@@ -631,7 +614,7 @@ pub mod tests {
     pub struct FixedProber(pub ProbeResult);
 
     impl Prober for FixedProber {
-        fn probe(&self, _: String, _: Settings, _: Option<Credentials>, done: ProbeDone) {
+        fn probe(&self, _: String, _: Settings, _: RequestOptions, done: ProbeDone) {
             done(self.0.clone());
         }
 
@@ -644,7 +627,7 @@ pub mod tests {
     pub struct VideoProber(pub Video);
 
     impl Prober for VideoProber {
-        fn probe(&self, url: String, _: Settings, _: Option<Credentials>, _: ProbeDone) {
+        fn probe(&self, url: String, _: Settings, _: RequestOptions, _: ProbeDone) {
             panic!("{url} was probed, but it is a video");
         }
 
@@ -764,9 +747,9 @@ pub mod tests {
             Rc::new(VideoProber(video())),
         );
         let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string();
-        adder.add_silently(url.clone(), Preset::default(), true, None);
-        adder.add_silently(url.clone(), Preset::default(), true, Some(18));
-        adder.add_silently(url, Preset::default(), true, Some(999));
+        adder.add_silently(url.clone(), Preset::default(), true, Vec::new());
+        adder.add_silently(url.clone(), Preset::default(), true, vec![18]);
+        adder.add_silently(url, Preset::default(), true, vec![999]);
         let commands = recorder.0.borrow();
         assert_eq!(
             commands.len(),
@@ -901,6 +884,7 @@ pub mod tests {
         let preset = Preset {
             save_dir: Some(dir.path().into()),
             file_name: Some("mine.mp3".into()),
+            ..Preset::default()
         };
         adder
             .open_info("http://example.test/x".into(), None, preset)
@@ -920,16 +904,18 @@ pub mod tests {
             "http://example.test/movie.mkv".into(),
             Preset::default(),
             false,
-            None,
+            Vec::new(),
         );
         adder.add_silently(
             "http://example.test/b".into(),
             Preset {
                 save_dir: Some("/elsewhere".into()),
                 file_name: Some("b.zip".into()),
+                referer: Some("https://a.test/page".into()),
+                cookies: Some("s=1".into()),
             },
             true,
-            None,
+            Vec::new(),
         );
         assert!(adder.add_url.borrow().is_none() && adder.infos.borrow().is_empty());
         let commands = recorder.0.borrow();

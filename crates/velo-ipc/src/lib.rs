@@ -63,10 +63,16 @@ pub enum Message {
         start: bool,
         /// Add it without asking; otherwise the app shows Download File Info first.
         silent: bool,
-        /// For a YouTube address added without asking: the format (itag) to download; the
-        /// best video with sound if `None`.
+        /// For a YouTube address added without asking: the formats (itags) to download, one
+        /// stream or video then sound; the best choice if empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        itags: Vec<u32>,
+        /// The page the link was on, sent as `Referer`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        itag: Option<u32>,
+        referer: Option<String>,
+        /// Cookies for the address, sent as `Cookie`; kept in memory only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cookies: Option<String>,
     },
     /// Start a queue: `queue`, or the main queue if `None`.
     StartQueue {
@@ -280,7 +286,9 @@ mod tests {
                 file_name: None,
                 start: true,
                 silent: false,
-                itag: None,
+                itags: Vec::new(),
+                referer: None,
+                cookies: None,
             }
         );
         assert_eq!(
@@ -325,7 +333,9 @@ mod tests {
             file_name: Some("y.zip".into()),
             start: false,
             silent: true,
-            itag: Some(18),
+            itags: vec![137, 140],
+            referer: Some("https://a.test/".into()),
+            cookies: Some("s=1".into()),
         };
         send(&endpoint, &add).unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), add);

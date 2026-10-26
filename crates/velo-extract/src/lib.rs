@@ -133,6 +133,34 @@ impl Choice<'_> {
     pub fn is_audio_only(&self) -> bool {
         matches!(self, Self::Single(f) if f.kind == StreamKind::Audio)
     }
+
+    /// How it is listed for people: `1080p MP4, video and sound joined, 95.21 MB`,
+    /// `360p MP4, video with sound, 12.70 MB` or `Sound only, M4A 128 kbps, 3.27 MB`.
+    pub fn label(&self) -> String {
+        let size = self
+            .size()
+            .map(|n| format!(", {}", velo_core::format::size(n)))
+            .unwrap_or_default();
+        let extension = self.extension().to_uppercase();
+        let first = self.formats()[0];
+        if self.is_audio_only() {
+            let kbps = first.bitrate.unwrap_or_default() / 1000;
+            return format!("Sound only, {extension} {kbps} kbps{size}");
+        }
+        let quality = first
+            .quality_label
+            .clone()
+            .or_else(|| first.height.map(|h| format!("{h}p")))
+            .unwrap_or_else(|| format!("itag {}", first.itag));
+        let how = match self {
+            Self::Joined { video, .. } if !video.codecs.iter().any(|c| c.starts_with("avc1")) => {
+                "video and sound joined, not H.264"
+            }
+            Self::Joined { .. } => "video and sound joined",
+            Self::Single(_) => "video with sound",
+        };
+        format!("{quality} {extension}, {how}{size}")
+    }
 }
 
 impl Video {
@@ -353,6 +381,9 @@ impl Extractor {
                 };
             }
             formats.retain(|f| !f.needs_deciphering());
+            // Keep one stream per itag, so an itag names one stream.
+            let mut seen = std::collections::HashSet::new();
+            formats.retain(|f| seen.insert(f.itag));
             if formats.is_empty() {
                 refusals.push(format!("{}: no streams", client.name));
                 continue;
