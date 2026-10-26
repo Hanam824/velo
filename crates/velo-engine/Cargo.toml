@@ -13,7 +13,8 @@ percent-encoding.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "rt", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
+tokio-util.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

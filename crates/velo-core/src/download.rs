@@ -56,6 +56,10 @@ pub struct Download {
     pub state: DownloadState,
     /// The byte ranges, sorted by `start`; empty until the download has been probed.
     pub segments: Vec<Segment>,
+    /// When the download was added, in seconds since the Unix epoch.
+    pub added_at: Option<i64>,
+    /// When the download was last started, in seconds since the Unix epoch.
+    pub last_try_at: Option<i64>,
 }
 
 impl Download {
@@ -79,12 +83,27 @@ impl Download {
             description: String::new(),
             state: DownloadState::Queued,
             segments: Vec::new(),
+            added_at: None,
+            last_try_at: None,
         }
     }
 
     /// Full path of the finished file.
     pub fn save_path(&self) -> PathBuf {
         self.save_dir.join(&self.file_name)
+    }
+
+    /// Whether the download completed and its file is at the save path.
+    pub fn is_finished(&self) -> bool {
+        self.state == DownloadState::Complete
+    }
+
+    /// Whether the download is being probed, fetched or merged.
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self.state,
+            DownloadState::Probing | DownloadState::Downloading | DownloadState::Merging
+        )
     }
 
     /// Bytes downloaded so far, summed over all segments.

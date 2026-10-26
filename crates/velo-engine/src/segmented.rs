@@ -16,9 +16,10 @@ use reqwest::{Client, StatusCode, Url};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use velo_core::{Segment, SegmentId, SegmentState, Settings};
 
-use crate::fetch::send_range;
+use crate::fetch::{cancellable, send_range};
 use crate::{Error, Result, planner};
 
 /// How a segmented download runs.
@@ -107,15 +108,18 @@ impl Progress {
 ///
 /// The server must answer range requests. Before starting, each segment's progress is set from
 /// its part file's size on disk, so this resumes whatever is already there; a part file longer
-/// than its segment is cut back. On the first error that retries don't fix, the other workers
-/// are stopped, active segments go back to pending and the error is returned. Dropping the
-/// future stops all workers too.
+/// than its segment is cut back.
+///
+/// Cancelling `cancel` stops the download with [`Error::Cancelled`]. On that, or on the first
+/// error that retries don't fix, every worker is stopped and waited for, so nothing writes to the
+/// part files once this returns; active segments go back to pending.
 pub async fn download_segments(
     client: &Client,
     url: &Url,
     dir: &Path,
     progress: &Progress,
     options: &Options,
+    cancel: &CancellationToken,
 ) -> Result<()> {
     fs::create_dir_all(dir).await?;
     sync_from_disk(dir, progress).await?;
@@ -126,25 +130,36 @@ pub async fn download_segments(
         dir: dir.to_path_buf(),
         progress: progress.clone(),
         options: options.clone(),
+        stop: cancel.child_token(),
     });
     let mut workers = JoinSet::new();
     for _ in 0..options.max_connections.max(1) {
         let worker = Arc::clone(&worker);
         workers.spawn(async move { worker.run().await });
     }
+    let mut first_error = None;
     while let Some(joined) = workers.join_next().await {
         let result = joined.unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
         if let Err(error) = result {
-            workers.abort_all();
-            progress.with(|segments| {
-                for segment in segments.iter_mut() {
-                    if segment.state == SegmentState::Active {
-                        segment.state = SegmentState::Pending;
-                    }
-                }
-            });
-            return Err(error);
+            // Stop the others, but keep waiting for them so none is still writing.
+            worker.stop.cancel();
+            first_error.get_or_insert(error);
         }
+    }
+    if let Some(error) = first_error {
+        progress.with(|segments| {
+            for segment in segments.iter_mut() {
+                if segment.state == SegmentState::Active {
+                    segment.state = SegmentState::Pending;
+                }
+            }
+        });
+        // Report the user's stop rather than an error it caused in another worker.
+        return Err(if cancel.is_cancelled() {
+            Error::Cancelled
+        } else {
+            error
+        });
     }
     // A worker only stops early on an error, so all segments are done here.
     debug_assert!(progress.with(|s| s.iter().all(|s| s.state == SegmentState::Done)));
@@ -188,12 +203,17 @@ struct Worker {
     dir: PathBuf,
     progress: Progress,
     options: Options,
+    /// Cancelled when the download is stopped or a worker fails.
+    stop: CancellationToken,
 }
 
 impl Worker {
     /// Fetches segments until the planner has no more work worth a connection.
     async fn run(&self) -> Result<()> {
         loop {
+            if self.stop.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
             let next = self
                 .progress
                 .with(|segments| planner::next_work(segments, self.options.min_segment_size));
@@ -219,7 +239,12 @@ impl Worker {
             if !is_retryable(&error) || failures >= self.options.max_retries {
                 return Err(error);
             }
-            tokio::time::sleep(self.options.retry_delay * 2u32.saturating_pow(failures)).await;
+            let delay = self.options.retry_delay * 2u32.saturating_pow(failures);
+            cancellable(&self.stop, async {
+                tokio::time::sleep(delay).await;
+                Ok(())
+            })
+            .await?;
             failures += 1;
         }
     }
@@ -251,9 +276,22 @@ impl Worker {
         }
         file.seek(SeekFrom::Start(have)).await?;
 
-        let mut response = send_range(&self.client, &self.url, position, Some(end)).await?;
+        let mut response = cancellable(
+            &self.stop,
+            send_range(&self.client, &self.url, position, Some(end)),
+        )
+        .await?;
         let mut writer = BufWriter::new(file);
-        while let Some(chunk) = response.chunk().await? {
+        loop {
+            let chunk = match cancellable(&self.stop, async { Ok(response.chunk().await?) }).await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    // Keep what was counted on disk, so the part file stays the truth.
+                    writer.flush().await?;
+                    return Err(error);
+                }
+            };
             let (take, done) = self.progress.update(id, |s| {
                 let take = chunk.len().min(s.remaining() as usize);
                 s.downloaded += take as u64;

@@ -1,6 +1,7 @@
 //! Picks the file name for a download from the server's `Content-Disposition` or the URL.
 
 use std::borrow::Cow;
+use std::path::Path;
 
 use percent_encoding::percent_decode_str;
 use reqwest::Url;
@@ -75,6 +76,22 @@ pub fn sanitize_file_name(name: &str) -> Option<String> {
         Some(ext) => format!("{stem}.{ext}"),
         None => stem,
     })
+}
+
+/// Returns `name`, or `name (1)`, `name (2)`… with the number before the extension, whichever
+/// is the first that nothing in `dir` is called yet.
+pub fn unique_file_name(dir: &Path, name: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    (1..)
+        .map(|n| format!("{stem} ({n}){ext}"))
+        .find(|candidate| !dir.join(candidate).exists())
+        .expect("some number is free")
 }
 
 /// The file name in a `Content-Disposition` header value, preferring the RFC 6266 `filename*`
@@ -232,6 +249,17 @@ mod tests {
         assert_eq!(sanitize_file_name(".hidden").as_deref(), Some(".hidden"));
         assert_eq!(sanitize_file_name(".."), None);
         assert_eq!(sanitize_file_name(""), None);
+    }
+
+    #[test]
+    fn taken_names_get_a_number_before_the_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(unique_file_name(dir.path(), "a.zip"), "a.zip");
+        std::fs::write(dir.path().join("a.zip"), "").unwrap();
+        std::fs::write(dir.path().join("a (1).zip"), "").unwrap();
+        assert_eq!(unique_file_name(dir.path(), "a.zip"), "a (2).zip");
+        std::fs::write(dir.path().join("README"), "").unwrap();
+        assert_eq!(unique_file_name(dir.path(), "README"), "README (1)");
     }
 
     #[test]

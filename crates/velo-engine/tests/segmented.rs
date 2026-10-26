@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use reqwest::{StatusCode, Url};
 use velo_core::{DownloadId, Segment, SegmentId, SegmentState};
-use velo_engine::{Error, Options, Progress, client, download_file, download_segments, merge};
+use velo_engine::{
+    CancellationToken, Error, Options, Progress, client, download_file, download_segments, merge,
+};
 
 use support::{SIZE, body};
 
@@ -129,9 +131,16 @@ async fn a_download_resumes_from_its_part_files() {
     ]);
 
     let url = Url::parse(&format!("{base}/files/data.bin")).unwrap();
-    download_segments(&client().unwrap(), &url, &dir, &progress, &options())
-        .await
-        .unwrap();
+    download_segments(
+        &client().unwrap(),
+        &url,
+        &dir,
+        &progress,
+        &options(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     let save_path = root.path().join("data.bin");
     merge(&dir, &progress.snapshot(), Some(SIZE as u64), &save_path)
         .await
