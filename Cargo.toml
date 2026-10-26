@@ -18,6 +18,8 @@ velo-platform = { path = "crates/velo-platform" }
 velo-store = { path = "crates/velo-store" }
 
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+# Local time for the list's dates and the scheduler, the same way on every OS.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures-util = { version = "0.3", default-features = false }
 percent-encoding = "2"
 proptest = "1"

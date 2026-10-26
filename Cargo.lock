@@ -5440,6 +5440,7 @@ dependencies = [
 name = "velo-gui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "i-slint-backend-testing",
  "png",
  "slint",

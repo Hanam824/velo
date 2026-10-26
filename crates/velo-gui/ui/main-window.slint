@@ -3,6 +3,7 @@
 
 import { AboutPanel } from "about.slint";
 import { CategoriesPane, CategoryItem } from "categories.slint";
+import { DownloadList, DownloadRow } from "download-list.slint";
 import { StatusBar } from "status-bar.slint";
 import { Appearance, Theme } from "theme.slint";
 import { Toolbar } from "toolbar.slint";
@@ -32,6 +33,10 @@ export component AppWindow inherits Window {
     in property <[CategoryItem]> categories;
     in-out property <string> selected-category: "all";
     in-out property <bool> show-categories: true;
+    in property <[DownloadRow]> downloads;
+    in-out property <int> selected-id: -1;
+    in property <int> sort-column: 0;
+    in property <bool> sort-ascending: true;
     in property <string> status-message: "Ready";
     in property <string> status-summary;
 
@@ -50,6 +55,13 @@ export component AppWindow inherits Window {
     callback delete-completed();
     callback category-selected(key: string);
     callback category-toggled(key: string);
+    callback selection-changed(id: int);
+    callback download-activated(id: int);
+    callback sort(column: int);
+    callback move-selection(delta: int);
+    callback resume-download(id: int);
+    callback stop-download(id: int);
+    callback delete-download(id: int);
     callback appearance-changed(appearance: Appearance);
     callback quit();
 
@@ -182,22 +194,19 @@ export component AppWindow inherits Window {
                 maximum: root.width / 2;
             }
 
-            // Empty state until the download list arrives (Day 12).
-            VerticalLayout {
+            DownloadList {
                 horizontal-stretch: 1;
-                alignment: center;
-                spacing: 8px;
-                Text {
-                    text: "No downloads yet";
-                    horizontal-alignment: center;
-                    font-size: 20px;
-                    color: Theme.text;
-                }
-                Text {
-                    text: "Use Add URL to download a file.";
-                    horizontal-alignment: center;
-                    color: Theme.text-muted;
-                }
+                rows: root.downloads;
+                selected-id <=> root.selected-id;
+                sort-column: root.sort-column;
+                sort-ascending: root.sort-ascending;
+                selection-changed(id) => { root.selection-changed(id); }
+                activated(id) => { root.download-activated(id); }
+                sort(column) => { root.sort(column); }
+                move-selection(delta) => { root.move-selection(delta); }
+                resume(id) => { root.resume-download(id); }
+                stop(id) => { root.stop-download(id); }
+                delete(id) => { root.delete-download(id); }
             }
         }
 

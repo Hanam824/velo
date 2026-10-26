@@ -1,0 +1,369 @@
+// The download list: a table with a file-type icon per row, sortable resizable columns and a
+// context menu. Rust builds the rows, sorts them and decides what each menu item can do.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Which icon a download's row shows, from its file's category.
+export enum FileKind { other, archive, document, music, program, video }
+
+// One row of the download list, already formatted for display.
+export struct DownloadRow {
+    // The download's id.
+    id: int,
+    name: string,
+    kind: FileKind,
+    // Shown in the Q column: the queue's mark if the download is in one.
+    queue: string,
+    size: string,
+    status: string,
+    // Whether the download failed, so the status shows in the danger colour.
+    failed: bool,
+    time-left: string,
+    rate: string,
+    last-try: string,
+    description: string,
+    can-resume: bool,
+    can-stop: bool,
+}
+
+// A column header: its title, the sort arrow and a handle to resize it.
+component HeaderCell inherits Rectangle {
+    in property <string> title;
+    in property <bool> sorted;
+    in property <bool> ascending;
+    in-out property <length> cell-width;
+    callback clicked();
+
+    width: root.cell-width;
+    background: touch.has-hover ? Theme.hover : transparent;
+    accessible-role: button;
+    accessible-label: root.title;
+    accessible-action-default => { root.clicked(); }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 8px;
+        spacing: 2px;
+        Text {
+            text: root.title;
+            vertical-alignment: center;
+            overflow: elide;
+            font-weight: 600;
+            color: Theme.text;
+        }
+        if root.sorted: Image {
+            source: root.ascending
+                ? @image-url("../../../assets/icons/lucide/arrow-up.svg")
+                : @image-url("../../../assets/icons/lucide/arrow-down.svg");
+            colorize: Theme.text-muted;
+            width: 12px;
+        }
+    }
+    Rectangle {
+        x: parent.width - 5px;
+        width: 5px;
+        Rectangle {
+            x: 2px;
+            width: 1px;
+            background: Theme.border;
+        }
+        TouchArea {
+            mouse-cursor: col-resize;
+            moved => {
+                if (self.pressed) {
+                    root.cell-width = max(40px, root.cell-width + self.mouse-x - self.pressed-x);
+                }
+            }
+        }
+    }
+}
+
+// One table cell's text.
+component Cell inherits Text {
+    vertical-alignment: center;
+    overflow: elide;
+    color: Theme.text;
+}
+
+export component DownloadList inherits Rectangle {
+    in property <[DownloadRow]> rows;
+    // Id of the selected download, or -1.
+    in-out property <int> selected-id: -1;
+    // Column the rows are sorted by (0 = File Name … 7 = Description), and the direction.
+    in property <int> sort-column: 0;
+    in property <bool> sort-ascending: true;
+
+    callback selection-changed(id: int);
+    // A row was double-clicked or Enter was pressed on it.
+    callback activated(id: int);
+    // A header was clicked: sort by that column (Rust flips the direction on a second click).
+    callback sort(column: int);
+    // Up or down arrow key: move the selection by `delta` rows.
+    callback move-selection(delta: int);
+    callback resume(id: int);
+    callback stop(id: int);
+    callback delete(id: int);
+
+    in-out property <length> name-width: 260px;
+    in-out property <length> queue-width: 32px;
+    in-out property <length> size-width: 90px;
+    in-out property <length> status-width: 90px;
+    in-out property <length> time-left-width: 100px;
+    in-out property <length> rate-width: 100px;
+    in-out property <length> last-try-width: 140px;
+
+    background: Theme.window;
+
+    // The icon image for a file kind.
+    function kind-icon(kind: FileKind) -> image {
+        if kind == FileKind.archive {
+            return @image-url("../../../assets/icons/lucide/file-archive.svg");
+        }
+        if kind == FileKind.document {
+            return @image-url("../../../assets/icons/lucide/file-text.svg");
+        }
+        if kind == FileKind.music {
+            return @image-url("../../../assets/icons/lucide/music.svg");
+        }
+        if kind == FileKind.program {
+            return @image-url("../../../assets/icons/lucide/package.svg");
+        }
+        if kind == FileKind.video {
+            return @image-url("../../../assets/icons/lucide/film.svg");
+        }
+        @image-url("../../../assets/icons/lucide/file.svg")
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.UpArrow {
+                root.move-selection(-1);
+                return accept;
+            }
+            if event.text == Key.DownArrow {
+                root.move-selection(1);
+                return accept;
+            }
+            if event.text == Key.Return && root.selected-id >= 0 {
+                root.activated(root.selected-id);
+                return accept;
+            }
+            if event.text == Key.Delete && root.selected-id >= 0 {
+                root.delete(root.selected-id);
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            Rectangle {
+                height: 26px;
+                background: Theme.panel;
+                HorizontalLayout {
+                    HeaderCell {
+                        title: "File Name";
+                        cell-width <=> root.name-width;
+                        sorted: root.sort-column == 0;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort(0); }
+                    }
+                    HeaderCell {
+                        title: "Q";
+                        cell-width <=> root.queue-width;
+                        sorted: root.sort-column == 1;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort(1); }
+                    }
+                    HeaderCell {
+                        title: "Size";
+                        cell-width <=> root.size-width;
+                        sorted: root.sort-column == 2;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort(2); }
+                    }
+                    HeaderCell {
+                        title: "Status";
+                        cell-width <=> root.status-width;
+                        sorted: root.sort-column == 3;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort(3); }
+                    }
+                    HeaderCell {
+                        title: "Time left";
+                        cell-width <=> root.time-left-width;
+                        sorted: root.sort-column == 4;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort(4); }
+                    }
+                    HeaderCell {
+                        title: "Transfer rate";
+                        cell-width <=> root.rate-width;
+                        sorted: root.sort-column == 5;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort(5); }
+                    }
+                    HeaderCell {
+                        title: "Last Try Date";
+                        cell-width <=> root.last-try-width;
+                        sorted: root.sort-column == 6;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort(6); }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: description-touch.has-hover ? Theme.hover : transparent;
+                        description-touch := TouchArea {
+                            clicked => { root.sort(7); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            spacing: 2px;
+                            Text {
+                                text: "Description";
+                                vertical-alignment: center;
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            if root.sort-column == 7: Image {
+                                source: root.sort-ascending
+                                    ? @image-url("../../../assets/icons/lucide/arrow-up.svg")
+                                    : @image-url("../../../assets/icons/lucide/arrow-down.svg");
+                                colorize: Theme.text-muted;
+                                width: 12px;
+                            }
+                            Rectangle { }
+                        }
+                    }
+                }
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Theme.border;
+                }
+            }
+
+            ListView {
+                vertical-stretch: 1;
+                for row[index] in root.rows: ContextMenuArea {
+                    height: 24px;
+                    Menu {
+                        MenuItem {
+                            title: "Resume";
+                            enabled: row.can-resume;
+                            activated => { root.resume(row.id); }
+                        }
+                        MenuItem {
+                            title: "Stop";
+                            enabled: row.can-stop;
+                            activated => { root.stop(row.id); }
+                        }
+                        MenuSeparator { }
+                        MenuItem {
+                            title: "Delete";
+                            activated => { root.delete(row.id); }
+                        }
+                    }
+
+                    Rectangle {
+                        width: parent.width;
+                        height: parent.height;
+                        background: row.id == root.selected-id ? Theme.selection
+                            : touch.has-hover ? Theme.hover
+                            : Math.mod(index, 2) == 1 ? Theme.stripe : transparent;
+                        accessible-role: list-item;
+                        accessible-label: row.name;
+                        accessible-item-selected: row.id == root.selected-id;
+
+                        touch := TouchArea {
+                            pointer-event(event) => {
+                                if event.kind == PointerEventKind.down {
+                                    keys.focus();
+                                    if root.selected-id != row.id {
+                                        root.selected-id = row.id;
+                                        root.selection-changed(row.id);
+                                    }
+                                }
+                            }
+                            double-clicked => { root.activated(row.id); }
+                        }
+                        HorizontalLayout {
+                            HorizontalLayout {
+                                width: root.name-width;
+                                padding-left: 6px;
+                                spacing: 6px;
+                                Image {
+                                    source: root.kind-icon(row.kind);
+                                    colorize: Theme.icon;
+                                    width: 16px;
+                                }
+                                Cell {
+                                    text: row.name;
+                                }
+                            }
+                            Cell {
+                                width: root.queue-width;
+                                text: row.queue;
+                                horizontal-alignment: center;
+                            }
+                            Cell {
+                                width: root.size-width;
+                                text: row.size;
+                                horizontal-alignment: right;
+                            }
+                            Cell {
+                                width: root.status-width;
+                                text: row.status;
+                                horizontal-alignment: right;
+                                color: row.failed ? Theme.danger : Theme.text;
+                            }
+                            Cell {
+                                width: root.time-left-width;
+                                text: row.time-left;
+                                horizontal-alignment: right;
+                            }
+                            Cell {
+                                width: root.rate-width;
+                                text: row.rate;
+                                horizontal-alignment: right;
+                            }
+                            Cell {
+                                width: root.last-try-width;
+                                text: row.last-try;
+                                horizontal-alignment: right;
+                            }
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                Cell {
+                                    text: row.description;
+                                    color: Theme.text-muted;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.rows.length == 0: VerticalLayout {
+        y: 26px;
+        height: parent.height - 26px;
+        alignment: center;
+        spacing: 8px;
+        Text {
+            text: "No downloads here";
+            horizontal-alignment: center;
+            font-size: 18px;
+            color: Theme.text;
+        }
+        Text {
+            text: "Use Add URL to download a file.";
+            horizontal-alignment: center;
+            color: Theme.text-muted;
+        }
+    }
+}
