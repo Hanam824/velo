@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use tokio::sync::broadcast::Receiver;
 use velo_core::{ConnectionLimit, Download, DownloadId, DownloadState, EngineEvent, Settings};
-use velo_engine::{Credentials, Engine, EngineConfig, NewDownload, RequestOptions, RetryPolicy};
+use velo_engine::{
+    Credentials, DownloadEdit, Engine, EngineConfig, NewDownload, RequestOptions, RetryPolicy,
+};
 
 use support::{SIZE, body, versioned_body};
 
@@ -388,4 +390,53 @@ async fn referer_and_cookies_are_sent() {
         failed.state,
         DownloadState::Failed("server answered 403 Forbidden".into())
     );
+}
+
+#[tokio::test]
+async fn properties_change_a_waiting_download_but_only_the_description_of_a_finished_one() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+    let id = engine.add(new_download(
+        root.path(),
+        format!("{base}/fail/data.bin"),
+        false,
+    ));
+
+    engine.edit(
+        id,
+        DownloadEdit {
+            file_name: Some("../renamed?.bin".into()),
+            url: Some(format!("{base}/files/data.bin")),
+            description: Some("mirror".into()),
+        },
+    );
+    let edited = wait_for(&mut events, |e| match e {
+        EngineEvent::Changed(d) if d.id == id && d.description == "mirror" => Some(d.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(edited.file_name, "renamed_.bin");
+    assert!(edited.url.ends_with("/files/data.bin"));
+
+    // The new address works.
+    engine.resume(id);
+    let done = wait_for_state(&mut events, id, |s| *s == DownloadState::Complete).await;
+    assert_eq!(done.file_name, "renamed_.bin");
+
+    engine.edit(
+        id,
+        DownloadEdit {
+            file_name: Some("other.bin".into()),
+            description: Some("kept".into()),
+            ..DownloadEdit::default()
+        },
+    );
+    let complete = wait_for(&mut events, |e| match e {
+        EngineEvent::Changed(d) if d.id == id && d.description == "kept" => Some(d.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(complete.file_name, "renamed_.bin");
 }

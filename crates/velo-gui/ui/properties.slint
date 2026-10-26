@@ -1,0 +1,136 @@
+// A download's Properties: its name, folder, address and description. The name and address
+// can change only while the download waits, is paused or failed.
+
+import { Button, GridBox, LineEdit, VerticalBox } from "std-widgets.slint";
+import { FileKind, Icons } from "icons.slint";
+import { Theme } from "theme.slint";
+
+export component PropertiesWindow inherits Window {
+    in-out property <string> file-name;
+    in property <string> location;
+    in-out property <string> url;
+    in-out property <string> description;
+    in property <string> status;
+    in property <string> size;
+    in property <FileKind> kind;
+    // Whether the name and address can be changed.
+    in property <bool> editable;
+    // Whether the file is at its save path, so it can be opened.
+    in property <bool> finished;
+
+    callback apply();
+    callback cancel();
+    callback open-file();
+    callback open-folder();
+
+    title: "Properties";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 560px;
+    min-width: 420px;
+    background: Theme.window;
+
+    VerticalBox {
+        alignment: start;
+        HorizontalLayout {
+            spacing: 12px;
+            Image {
+                source: Icons.file(root.kind);
+                colorize: Theme.icon;
+                width: 32px;
+                height: 32px;
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: root.status;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                Text {
+                    text: root.size;
+                    horizontal-stretch: 1;
+                    color: Theme.text-muted;
+                }
+            }
+        }
+        GridBox {
+            padding: 0;
+            Row {
+                Text {
+                    text: "File name:";
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.file-name;
+                    read-only: !root.editable;
+                }
+            }
+            Row {
+                Text {
+                    text: "Folder:";
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                Text {
+                    text: root.location;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    color: Theme.text-muted;
+                }
+            }
+            Row {
+                Text {
+                    text: "Address:";
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.url;
+                    read-only: !root.editable;
+                }
+            }
+            Row {
+                Text {
+                    text: "Description:";
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.description;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: "Open";
+                enabled: root.finished;
+                clicked => { root.open-file(); }
+            }
+            Button {
+                text: "Open folder";
+                enabled: root.finished;
+                clicked => { root.open-folder(); }
+            }
+            Rectangle { }
+            Button {
+                text: "OK";
+                primary: true;
+                clicked => { root.apply(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+}

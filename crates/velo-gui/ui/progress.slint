@@ -1,7 +1,7 @@
 // The progress dialog of one download: its status, a progress bar, and in the details the
 // segment bar and a row per connection, as in the IDM layout.
 
-import { Button, ProgressIndicator, TabWidget, VerticalBox } from "std-widgets.slint";
+import { Button, CheckBox, ProgressIndicator, SpinBox, TabWidget, VerticalBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 // One segment for the segment bar, as fractions of the whole file.
@@ -82,6 +82,16 @@ export component ProgressWindow inherits Window {
     in property <[ConnectionRow]> connections;
     in-out property <bool> show-details: true;
 
+    // Speed Limiter tab: this download's own limit.
+    in-out property <bool> limit-enabled;
+    in-out property <int> limit-kb: 500;
+    // Options on completion tab.
+    in-out property <bool> show-complete: true;
+    in-out property <bool> exit-when-done;
+    in-out property <bool> shutdown-when-done;
+
+    callback limit-changed();
+    callback completion-changed();
     callback pause();
     callback resume();
     // Stops the download and closes the dialog.
@@ -133,6 +143,64 @@ export component ProgressWindow inherits Window {
                     ProgressIndicator {
                         progress: max(0, root.progress);
                         indeterminate: root.running && root.progress < 0;
+                    }
+                }
+            }
+            Tab {
+                title: "Speed Limiter";
+                VerticalBox {
+                    alignment: start;
+                    CheckBox {
+                        text: "Use speed limiter";
+                        checked <=> root.limit-enabled;
+                        toggled => { root.limit-changed(); }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Maximum download speed";
+                            vertical-alignment: center;
+                            color: root.limit-enabled ? Theme.text : Theme.text-disabled;
+                        }
+                        SpinBox {
+                            width: 120px;
+                            minimum: 1;
+                            maximum: 1000000;
+                            value <=> root.limit-kb;
+                            enabled: root.limit-enabled;
+                            edited => { root.limit-changed(); }
+                        }
+                        Text {
+                            text: "KB/sec";
+                            vertical-alignment: center;
+                            color: root.limit-enabled ? Theme.text : Theme.text-disabled;
+                        }
+                    }
+                    Text {
+                        text: "This limit applies on top of the global one in Options.";
+                        wrap: word-wrap;
+                        color: Theme.text-muted;
+                    }
+                }
+            }
+            Tab {
+                title: "Options on completion";
+                VerticalBox {
+                    alignment: start;
+                    CheckBox {
+                        text: "Show download complete dialog";
+                        checked <=> root.show-complete;
+                        toggled => { root.completion-changed(); }
+                    }
+                    CheckBox {
+                        text: "Exit Velo when done";
+                        checked <=> root.exit-when-done;
+                        toggled => { root.completion-changed(); }
+                    }
+                    CheckBox {
+                        text: "Turn off computer when done";
+                        checked <=> root.shutdown-when-done;
+                        toggled => { root.completion-changed(); }
                     }
                 }
             }

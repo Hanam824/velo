@@ -25,6 +25,8 @@ export struct DownloadRow {
     description: string,
     can-resume: bool,
     can-stop: bool,
+    // Whether the file is at its save path.
+    finished: bool,
 }
 
 // A column header: its title, the sort arrow and a handle to resize it.
@@ -107,6 +109,9 @@ export component DownloadList inherits Rectangle {
     callback resume(id: int);
     callback stop(id: int);
     callback delete(id: int);
+    callback open-file(id: int);
+    callback open-folder(id: int);
+    callback properties(id: int);
 
     in-out property <length> name-width: 260px;
     in-out property <length> queue-width: 32px;
@@ -232,6 +237,17 @@ export component DownloadList inherits Rectangle {
                     height: 24px;
                     Menu {
                         MenuItem {
+                            title: "Open";
+                            enabled: row.finished;
+                            activated => { root.open-file(row.id); }
+                        }
+                        MenuItem {
+                            title: "Open Folder";
+                            enabled: row.finished;
+                            activated => { root.open-folder(row.id); }
+                        }
+                        MenuSeparator { }
+                        MenuItem {
                             title: "Resume";
                             enabled: row.can-resume;
                             activated => { root.resume(row.id); }
@@ -245,6 +261,11 @@ export component DownloadList inherits Rectangle {
                         MenuItem {
                             title: "Delete";
                             activated => { root.delete(row.id); }
+                        }
+                        MenuSeparator { }
+                        MenuItem {
+                            title: "Properties";
+                            activated => { root.properties(row.id); }
                         }
                     }
 

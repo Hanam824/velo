@@ -8,12 +8,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use slint::{ComponentHandle, Model, VecModel};
-use velo_core::{DownloadId, DownloadState, EngineEvent, Settings};
-use velo_engine::{Engine, NewDownload};
+use velo_core::{Download, DownloadId, DownloadState, EngineEvent};
+use velo_engine::{DownloadEdit, Engine, NewDownload};
 
 use crate::categories::CategoryTree;
+use crate::complete::{Completion, Desktop};
+use crate::config::Config;
 use crate::list::{Column, DownloadTable};
 use crate::progress::ProgressDialogs;
+use crate::properties::PropertiesDialogs;
 use crate::toolbar::ToolbarState;
 use crate::{AppWindow, CategoryItem, DownloadRow, format};
 
@@ -29,6 +32,10 @@ pub trait Commands {
     fn pause_all(&self);
     /// Deletes download `id`, and its finished file with `delete_file`.
     fn delete(&self, id: DownloadId, delete_file: bool);
+    /// Limits download `id` to `rate` bytes per second, or removes its own limit.
+    fn set_speed_limit(&self, id: DownloadId, rate: Option<u64>);
+    /// Changes download `id`'s details.
+    fn edit(&self, id: DownloadId, edit: DownloadEdit);
 }
 
 impl Commands for Engine {
@@ -51,6 +58,14 @@ impl Commands for Engine {
     fn delete(&self, id: DownloadId, delete_file: bool) {
         Engine::delete(self, id, delete_file);
     }
+
+    fn set_speed_limit(&self, id: DownloadId, rate: Option<u64>) {
+        Engine::set_speed_limit(self, id, rate);
+    }
+
+    fn edit(&self, id: DownloadId, edit: DownloadEdit) {
+        Engine::edit(self, id, edit);
+    }
 }
 
 /// The main window's state and the code that keeps the window in step with it.
@@ -62,15 +77,27 @@ pub struct App {
     tree: RefCell<CategoryTree>,
     category_rows: Rc<VecModel<CategoryItem>>,
     progress: Rc<ProgressDialogs>,
+    properties: Rc<PropertiesDialogs>,
+    completion: Rc<Completion>,
+    desktop: Rc<dyn Desktop>,
 }
 
 impl App {
-    /// Fills `ui` from `settings` and connects its callbacks, sending commands to `commands`.
-    pub fn new(ui: &AppWindow, settings: &Settings, commands: Rc<dyn Commands>) -> Rc<Self> {
-        let tree = CategoryTree::new(&settings.categories);
+    /// Fills `ui` from the settings in `config` and connects its callbacks, sending commands to
+    /// `commands` and desktop actions to `desktop`.
+    pub fn new(
+        ui: &AppWindow,
+        config: Rc<Config>,
+        commands: Rc<dyn Commands>,
+        desktop: Rc<dyn Desktop>,
+    ) -> Rc<Self> {
+        let tree = CategoryTree::new(&config.settings().categories);
         let app = Rc::new(Self {
             ui: ui.as_weak(),
             progress: ProgressDialogs::new(commands.clone()),
+            properties: PropertiesDialogs::new(commands.clone(), desktop.clone()),
+            completion: Completion::new(config, desktop.clone()),
+            desktop,
             commands,
             table: RefCell::default(),
             rows: Rc::new(VecModel::default()),
@@ -122,6 +149,24 @@ impl App {
             }
         });
         ui.on_download_activated(on_row(self, App::show_progress));
+        ui.on_open_file(on_row(self, |app, id| {
+            if let Some(path) = app.finished_file(id) {
+                app.desktop.open(&path);
+            }
+        }));
+        ui.on_open_folder(on_row(self, |app, id| {
+            if let Some(path) = app.finished_file(id) {
+                app.desktop.reveal(&path);
+            }
+        }));
+        ui.on_properties(on_row(self, |app, id| {
+            let download = app.table.borrow().get(id).cloned();
+            if let Some(download) = download
+                && let Err(error) = app.properties.open(&download)
+            {
+                eprintln!("velo: couldn't open Properties: {error}");
+            }
+        }));
         ui.on_delete_confirmed(move |raw, delete_file| confirmed((raw, delete_file)));
     }
 
@@ -151,6 +196,13 @@ impl App {
         self.progress.window(id)
     }
 
+    /// The saved file of download `id`, if it is complete.
+    fn finished_file(&self, id: DownloadId) -> Option<std::path::PathBuf> {
+        let table = self.table.borrow();
+        let download = table.get(id).filter(|d| d.is_finished())?;
+        Some(download.save_path())
+    }
+
     /// Removes every complete download from the list, keeping their files.
     fn delete_completed(&self) {
         let complete: Vec<DownloadId> = self
@@ -169,12 +221,17 @@ impl App {
     /// Updates the table from engine events and redraws once.
     pub fn apply(&self, events: impl IntoIterator<Item = EngineEvent>) {
         let mut changed = false;
+        let mut finished: Vec<Download> = Vec::new();
         {
             let mut table = self.table.borrow_mut();
             for event in events {
                 changed = true;
                 match event {
                     EngineEvent::Added(download) | EngineEvent::Changed(download) => {
+                        let was_complete = table.get(download.id).map(|d| d.is_finished());
+                        if was_complete == Some(false) && download.is_finished() {
+                            finished.push(download.clone());
+                        }
                         table.upsert(download)
                     }
                     EngineEvent::Removed(id) => table.remove(id),
@@ -184,6 +241,11 @@ impl App {
         }
         if changed {
             self.refresh();
+        }
+        for download in finished {
+            let options = self.progress.options_for(download.id);
+            self.progress.close(download.id);
+            self.completion.finished(&download, &options);
         }
     }
 
@@ -273,6 +335,7 @@ pub mod tests {
     use velo_core::{DownloadState, ProgressUpdate};
 
     use super::*;
+    use crate::complete::tests::FakeDesktop;
     use crate::list::tests::sample;
 
     /// Records the commands it is sent.
@@ -306,14 +369,68 @@ pub mod tests {
                 .borrow_mut()
                 .push(format!("delete {} {delete_file}", id.0));
         }
+        fn set_speed_limit(&self, id: DownloadId, rate: Option<u64>) {
+            let rate = rate.map_or("none".into(), |r| r.to_string());
+            self.0.borrow_mut().push(format!("limit {} {rate}", id.0));
+        }
+        fn edit(&self, id: DownloadId, edit: DownloadEdit) {
+            self.0.borrow_mut().push(format!(
+                "edit {} name={} url={} desc={}",
+                id.0,
+                edit.file_name.unwrap_or_default(),
+                edit.url.unwrap_or_default(),
+                edit.description.unwrap_or_default()
+            ));
+        }
     }
 
     fn app() -> (AppWindow, Rc<App>, Recorder) {
+        let (ui, app, recorder, _) = app_with_desktop();
+        (ui, app, recorder)
+    }
+
+    fn app_with_desktop() -> (AppWindow, Rc<App>, Recorder, FakeDesktop) {
         i_slint_backend_testing::init_no_event_loop();
         let ui = AppWindow::new().unwrap();
         let recorder = Recorder::default();
-        let app = App::new(&ui, &Settings::default(), Rc::new(recorder.clone()));
-        (ui, app, recorder)
+        let desktop = FakeDesktop::default();
+        let config = Rc::new(Config::new(
+            velo_core::Settings::default(),
+            None,
+            "/downloads".into(),
+        ));
+        let app = App::new(
+            &ui,
+            config,
+            Rc::new(recorder.clone()),
+            Rc::new(desktop.clone()),
+        );
+        (ui, app, recorder, desktop)
+    }
+
+    #[test]
+    fn a_finished_download_closes_its_progress_and_shows_complete() {
+        let (ui, app, _, desktop) = app_with_desktop();
+        let running = sample(6, "a.zip", DownloadState::Downloading, 5, 10);
+        app.apply([EngineEvent::Added(running.clone())]);
+        ui.invoke_download_activated(6);
+        assert!(app.progress.is_open(DownloadId(6)));
+
+        let done = sample(6, "a.zip", DownloadState::Complete, 10, 10);
+        app.apply([EngineEvent::Changed(done.clone())]);
+        assert!(!app.progress.is_open(DownloadId(6)));
+        assert!(app.completion.window(DownloadId(6)).is_some());
+
+        // Open and Open Folder from the context menu act on the saved file.
+        ui.invoke_open_file(6);
+        ui.invoke_open_folder(6);
+        let path = done.save_path().display().to_string();
+        assert_eq!(
+            *desktop.0.borrow(),
+            [format!("open {path}"), format!("reveal {path}")]
+        );
+        ui.invoke_properties(6);
+        assert!(app.properties.window(DownloadId(6)).is_some());
     }
 
     #[test]

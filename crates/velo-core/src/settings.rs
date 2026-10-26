@@ -34,6 +34,10 @@ pub struct Settings {
     pub proxy: ProxySettings,
     /// Connection counts for particular servers, overriding [`Settings::max_connections`].
     pub connection_limits: Vec<ConnectionLimit>,
+    /// Whether a download that starts shows its progress dialog.
+    pub show_progress_dialog: bool,
+    /// Whether a download that finishes shows the Download complete dialog.
+    pub show_complete_dialog: bool,
 }
 
 /// How Velo connects to servers.
@@ -146,6 +150,8 @@ impl Default for Settings {
             user_agent: None,
             proxy: ProxySettings::default(),
             connection_limits: Vec::new(),
+            show_progress_dialog: true,
+            show_complete_dialog: true,
         }
     }
 }

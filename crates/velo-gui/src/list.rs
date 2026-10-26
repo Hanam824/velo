@@ -254,6 +254,7 @@ impl DownloadTable {
                 DownloadState::Queued | DownloadState::Paused | DownloadState::Failed(_)
             ),
             can_stop: running,
+            finished: download.is_finished(),
         }
     }
 }

@@ -1,0 +1,140 @@
+// Shown when a download finishes: where the file went, and a way to open it. Also the
+// countdown before turning the computer off when a download asked for that.
+
+import { Button, CheckBox, GridBox, VerticalBox } from "std-widgets.slint";
+import { FileKind, Icons } from "icons.slint";
+import { Theme } from "theme.slint";
+
+export component CompleteWindow inherits Window {
+    in property <string> address;
+    in property <string> size;
+    in property <string> saved-as;
+    in property <FileKind> kind;
+    in-out property <bool> dont-show-again;
+
+    callback open-file();
+    callback open-folder();
+    callback close-clicked();
+
+    title: "Download complete";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 520px;
+    min-width: 400px;
+    background: Theme.window;
+
+    VerticalBox {
+        alignment: start;
+        Text {
+            text: "Download complete";
+            font-size: 16px;
+            font-weight: 700;
+            color: Theme.text;
+        }
+        HorizontalLayout {
+            spacing: 12px;
+            GridBox {
+                padding: 0;
+                horizontal-stretch: 1;
+                Row {
+                    Text {
+                        text: "Address:";
+                        horizontal-stretch: 0;
+                        color: Theme.text-muted;
+                    }
+                    Text {
+                        text: root.address;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                        color: Theme.text;
+                    }
+                }
+                Row {
+                    Text {
+                        text: "File size:";
+                        horizontal-stretch: 0;
+                        color: Theme.text-muted;
+                    }
+                    Text {
+                        text: root.size;
+                        horizontal-stretch: 1;
+                        color: Theme.text;
+                    }
+                }
+                Row {
+                    Text {
+                        text: "Saved as:";
+                        horizontal-stretch: 0;
+                        color: Theme.text-muted;
+                    }
+                    Text {
+                        text: root.saved-as;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                        color: Theme.text;
+                    }
+                }
+            }
+            Image {
+                source: Icons.file(root.kind);
+                colorize: Theme.icon;
+                width: 40px;
+                height: 40px;
+            }
+        }
+        CheckBox {
+            text: "Don't show this dialog again";
+            checked <=> root.dont-show-again;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "Open";
+                primary: true;
+                clicked => { root.open-file(); }
+            }
+            Button {
+                text: "Open folder";
+                clicked => { root.open-folder(); }
+            }
+            Button {
+                text: "Close";
+                clicked => { root.close-clicked(); }
+            }
+        }
+    }
+}
+
+export component ShutdownWindow inherits Window {
+    // Seconds until the computer turns off.
+    in property <int> seconds;
+
+    callback shutdown-now();
+    callback cancel();
+
+    title: "Turning off the computer";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 420px;
+    background: Theme.window;
+
+    VerticalBox {
+        Text {
+            text: "The download is complete. The computer turns off in " + root.seconds + " seconds.";
+            wrap: word-wrap;
+            color: Theme.text;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "Turn off now";
+                clicked => { root.shutdown-now(); }
+            }
+            Button {
+                text: "Cancel";
+                primary: true;
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+}

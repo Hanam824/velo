@@ -7,10 +7,12 @@ mod add;
 mod app;
 mod bridge;
 mod categories;
+mod complete;
 mod config;
 mod format;
 mod list;
 mod progress;
+mod properties;
 #[cfg(test)]
 mod snapshot;
 mod toolbar;
@@ -18,7 +20,7 @@ mod toolbar;
 use std::rc::Rc;
 use std::time::Duration;
 
-use velo_core::{EngineEvent, Settings};
+use velo_core::EngineEvent;
 use velo_engine::RetryPolicy;
 use velo_platform::AppDirs;
 use velo_store::Store;
@@ -26,6 +28,7 @@ use velo_store::Store;
 use crate::add::Adder;
 use crate::app::{App, Commands};
 use crate::bridge::{Bridge, BridgeConfig};
+use crate::complete::{Desktop, SystemDesktop};
 use crate::config::Config;
 
 slint::include_modules!();
@@ -33,14 +36,16 @@ slint::include_modules!();
 /// How often the UI takes in engine events.
 const UI_REFRESH: Duration = Duration::from_millis(250);
 
-/// Creates the main window and its state, sending engine commands to `commands`.
+/// Creates the main window and its state, sending engine commands to `commands` and desktop
+/// actions to `desktop`.
 fn create_window(
-    settings: &Settings,
+    config: Rc<Config>,
     commands: Rc<dyn Commands>,
+    desktop: Rc<dyn Desktop>,
 ) -> Result<(AppWindow, Rc<App>), slint::PlatformError> {
     let ui = AppWindow::new()?;
     ui.set_version(env!("CARGO_PKG_VERSION").into());
-    let app = App::new(&ui, settings, commands);
+    let app = App::new(&ui, config, commands, desktop);
     ui.on_quit(|| {
         let _ = slint::quit_event_loop();
     });
@@ -64,18 +69,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let commands: Rc<dyn Commands> = Rc::new(bridge.engine().clone());
-    let (ui, app) = create_window(&settings, commands.clone())?;
-    app.apply(downloads.into_iter().map(EngineEvent::Added));
-    let bridge = Rc::new(bridge);
     let config = Rc::new(Config::new(
         settings,
         Some(dirs.settings()),
         dirs.downloads().to_path_buf(),
     ));
-    let adder = Adder::new(config, commands, bridge.clone());
+    let (ui, app) = create_window(config.clone(), commands.clone(), Rc::new(SystemDesktop))?;
+    app.apply(downloads.into_iter().map(EngineEvent::Added));
+    let bridge = Rc::new(bridge);
+    let adder = Adder::new(config.clone(), commands, bridge.clone());
     let shown = Rc::downgrade(&app);
     adder.on_started(move |id| {
-        if let Some(app) = shown.upgrade() {
+        if let Some(app) = shown.upgrade()
+            && config.settings().show_progress_dialog
+        {
             app.show_progress(id);
         }
     });
@@ -104,16 +111,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use slint::Model;
-    use velo_core::{DownloadId, DownloadState, EngineEvent, ProgressUpdate};
+    use velo_core::{DownloadId, DownloadState, EngineEvent, ProgressUpdate, Settings};
 
     use super::*;
     use crate::app::tests::Recorder;
+    use crate::complete::tests::FakeDesktop;
+
+    /// Settings kept in memory only.
+    fn test_config() -> Rc<Config> {
+        Rc::new(Config::new(Settings::default(), None, "/downloads".into()))
+    }
     use crate::list::tests::sample;
 
     #[test]
     fn window_shows_the_version_categories_and_switches_appearance() {
         i_slint_backend_testing::init_no_event_loop();
-        let (ui, _app) = create_window(&Settings::default(), Rc::new(Recorder::default())).unwrap();
+        let (ui, _app) = create_window(
+            test_config(),
+            Rc::new(Recorder::default()),
+            Rc::new(FakeDesktop::default()),
+        )
+        .unwrap();
         assert_eq!(ui.get_version(), env!("CARGO_PKG_VERSION"));
         assert_eq!(ui.get_categories().row_data(0).unwrap().key, "all");
         let rows = ui.get_categories().row_count();
@@ -139,7 +157,12 @@ mod tests {
         );
         std::fs::create_dir_all(&dir).unwrap();
         let window = snapshot::init();
-        let (ui, app) = create_window(&Settings::default(), Rc::new(Recorder::default())).unwrap();
+        let (ui, app) = create_window(
+            test_config(),
+            Rc::new(Recorder::default()),
+            Rc::new(FakeDesktop::default()),
+        )
+        .unwrap();
         let mb = 1024 * 1024;
         for download in [
             sample(
@@ -224,6 +247,25 @@ mod tests {
         app.show_progress(DownloadId(1));
         let progress = app.progress_window(DownloadId(1)).unwrap();
         snapshot::save(&window, &progress, 560, 520, &dir.join("progress.png"));
+        progress.hide().unwrap();
+
+        let complete = CompleteWindow::new().unwrap();
+        complete.set_address("https://example.org/report-q3.pdf".into());
+        complete.set_size("3.00 MB".into());
+        complete.set_saved_as("/Users/me/Downloads/report-q3.pdf".into());
+        complete.set_kind(FileKind::Document);
+        snapshot::save(&window, &complete, 520, 220, &dir.join("complete.png"));
+        complete.hide().unwrap();
+
+        let properties = PropertiesWindow::new().unwrap();
+        properties.set_file_name("holiday-video.mp4".into());
+        properties.set_location("/Users/me/Movies".into());
+        properties.set_url("https://media.example.net/holiday-video.mp4".into());
+        properties.set_status("Paused".into());
+        properties.set_size("1.22 GB".into());
+        properties.set_kind(FileKind::Video);
+        properties.set_editable(true);
+        snapshot::save(&window, &properties, 560, 260, &dir.join("properties.png"));
     }
 
     /// Six segments of a `total`-byte file in different states, as the planner would leave them.
