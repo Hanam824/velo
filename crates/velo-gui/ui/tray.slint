@@ -1,0 +1,28 @@
+// Velo's icon in the system tray (the menu bar on macOS), which keeps the app reachable while
+// its window is closed.
+
+export component VeloTray inherits SystemTrayIcon {
+    callback open();
+    callback add-url();
+    callback exit();
+
+    icon: @image-url("../../../assets/icons/velo.svg");
+    tooltip: "Velo Download Manager";
+    clicked => { root.open(); }
+
+    Menu {
+        MenuItem {
+            title: "Open Velo";
+            activated => { root.open(); }
+        }
+        MenuItem {
+            title: "Add URL…";
+            activated => { root.add-url(); }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: "Exit";
+            activated => { root.exit(); }
+        }
+    }
+}

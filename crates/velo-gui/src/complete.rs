@@ -28,6 +28,8 @@ pub trait Desktop {
     fn shutdown(&self);
     /// Quits Velo, pausing and saving what is still running.
     fn quit(&self);
+    /// Shows a desktop notification.
+    fn notify(&self, title: &str, body: &str);
 }
 
 /// The real desktop, through `velo-platform` and Slint.
@@ -55,6 +57,12 @@ impl Desktop for SystemDesktop {
     fn quit(&self) {
         let _ = slint::quit_event_loop();
     }
+
+    fn notify(&self, title: &str, body: &str) {
+        if let Err(error) = velo_platform::notify(title, body) {
+            eprintln!("velo: {error}");
+        }
+    }
 }
 
 /// Handles finished downloads.
@@ -79,11 +87,13 @@ impl Completion {
 
     /// Reacts to `download` having just finished, as `options` say.
     pub fn finished(self: &Rc<Self>, download: &Download, options: &DownloadOptions) {
-        if options.show_complete
-            && self.config.settings().show_complete_dialog
-            && let Err(error) = self.show(download)
-        {
-            eprintln!("velo: couldn't open Download complete: {error}");
+        if options.show_complete && self.config.settings().show_complete_dialog {
+            if let Err(error) = self.show(download) {
+                eprintln!("velo: couldn't open Download complete: {error}");
+            }
+        } else {
+            self.desktop
+                .notify("Download complete", &download.file_name);
         }
         if options.shutdown {
             if let Err(error) = self.start_countdown() {
@@ -96,6 +106,10 @@ impl Completion {
 
     /// Reacts to `queue` having finished, as its schedule says.
     pub fn queue_finished(self: &Rc<Self>, queue: &velo_core::Queue) {
+        self.desktop.notify(
+            "Queue finished",
+            &format!("{} has no more downloads", queue.name),
+        );
         if queue.schedule.shutdown_when_done {
             if let Err(error) = self.start_countdown() {
                 eprintln!("velo: couldn't start the shutdown countdown: {error}");
@@ -257,6 +271,9 @@ pub mod tests {
         fn quit(&self) {
             self.0.borrow_mut().push("quit".into());
         }
+        fn notify(&self, title: &str, body: &str) {
+            self.0.borrow_mut().push(format!("notify {title}: {body}"));
+        }
     }
 
     fn completion() -> (Rc<Completion>, Rc<Config>, FakeDesktop) {
@@ -291,6 +308,11 @@ pub mod tests {
         assert!(!config.settings().show_complete_dialog);
         completion.finished(&download, &DownloadOptions::default());
         assert!(completion.window(download.id).is_none());
+        // Without the dialog, a notification says it instead.
+        assert_eq!(
+            desktop.0.borrow().last().unwrap(),
+            "notify Download complete: a.zip"
+        );
     }
 
     #[test]
@@ -308,7 +330,11 @@ pub mod tests {
                 ..quiet.clone()
             },
         );
-        assert_eq!(*desktop.0.borrow(), ["quit"]);
+        assert_eq!(
+            *desktop.0.borrow(),
+            ["notify Download complete: a.zip", "quit"]
+        );
+        desktop.0.borrow_mut().clear();
 
         completion.finished(
             &download,
@@ -321,7 +347,8 @@ pub mod tests {
         assert_eq!(countdown.get_seconds(), SHUTDOWN_DELAY);
         countdown.invoke_cancel();
         assert!(completion.countdown().is_none());
-        assert_eq!(*desktop.0.borrow(), ["quit"]);
+        assert_eq!(*desktop.0.borrow(), ["notify Download complete: a.zip"]);
+        desktop.0.borrow_mut().clear();
 
         completion.finished(
             &download,
@@ -331,6 +358,9 @@ pub mod tests {
             },
         );
         completion.countdown().unwrap().invoke_shutdown_now();
-        assert_eq!(*desktop.0.borrow(), ["quit", "shutdown", "quit"]);
+        assert_eq!(
+            *desktop.0.borrow(),
+            ["notify Download complete: a.zip", "shutdown", "quit"]
+        );
     }
 }

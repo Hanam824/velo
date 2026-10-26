@@ -40,8 +40,8 @@ pub struct Bridge {
     engine: Engine,
     runtime: tokio::runtime::Handle,
     events: mpsc::Receiver<EngineEvent>,
-    stop: Option<oneshot::Sender<()>>,
-    thread: Option<JoinHandle<()>>,
+    stop: RefCell<Option<oneshot::Sender<()>>>,
+    thread: RefCell<Option<JoinHandle<()>>>,
 }
 
 impl Bridge {
@@ -108,8 +108,8 @@ impl Bridge {
             engine,
             runtime: handle,
             events,
-            stop: Some(stop),
-            thread: Some(thread),
+            stop: RefCell::new(Some(stop)),
+            thread: RefCell::new(Some(thread)),
         })
     }
 
@@ -124,7 +124,10 @@ impl Bridge {
     }
 
     /// Pauses every download, waits until their state is saved, and stops the thread.
-    pub fn shutdown(mut self) {
+    ///
+    /// Takes `&self`, since other parts of the app (such as the add dialogs, which probe
+    /// through the bridge) may still hold it; calling it again does nothing.
+    pub fn shutdown(&self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -277,7 +280,11 @@ mod tests {
             &bridge,
             |e| matches!(e, EngineEvent::Changed(d) if d.id == id && matches!(d.state, DownloadState::Failed(_))),
         );
-        bridge.shutdown();
+        // Shutting down works while other parts of the app still hold the bridge, and twice.
+        let held = std::rc::Rc::new(bridge);
+        let other = held.clone();
+        held.shutdown();
+        other.shutdown();
 
         let saved = Store::open(&database).unwrap().load_downloads().unwrap();
         assert_eq!(saved.len(), 1);

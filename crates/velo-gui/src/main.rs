@@ -59,6 +59,11 @@ fn create_window(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dirs = AppDirs::new()?;
+    // Velo runs once per user: a second launch shows the first one's window and exits.
+    let endpoint = velo_ipc::Endpoint::for_data_dir(dirs.data());
+    if velo_ipc::send(&endpoint, &velo_ipc::Message::Activate).is_ok() {
+        return Ok(());
+    }
     let settings = velo_store::load_settings(&dirs.settings())?;
     let store = Store::open(&dirs.database())?;
     let downloads = store.load_downloads()?;
@@ -110,10 +115,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("velo: couldn't open Options: {error}");
         }
     });
-    ui.on_add_url(move || {
-        if let Err(error) = adder.open() {
-            eprintln!("velo: couldn't open Add URL: {error}");
+    let open_add = {
+        let adder = adder.clone();
+        move || {
+            if let Err(error) = adder.open() {
+                eprintln!("velo: couldn't open Add URL: {error}");
+            }
         }
+    };
+    ui.on_add_url(open_add.clone());
+
+    let shown = ui.as_weak();
+    velo_ipc::listen(&endpoint, move |message| match message {
+        velo_ipc::Message::Activate => {
+            let _ = shown.upgrade_in_event_loop(|ui| show_main(&ui));
+        }
+    })?;
+    let tray = match VeloTray::new() {
+        Ok(tray) => {
+            let shown = ui.as_weak();
+            tray.on_open(move || {
+                if let Some(ui) = shown.upgrade() {
+                    show_main(&ui);
+                }
+            });
+            tray.on_add_url(open_add);
+            tray.on_exit(|| {
+                let _ = slint::quit_event_loop();
+            });
+            Some(tray)
+        }
+        Err(error) => {
+            eprintln!("velo: no tray icon: {error}");
+            None
+        }
+    };
+    // Closing the window keeps Velo in the tray if the user wants that and there is a tray.
+    let has_tray = tray.is_some();
+    let close_config = config.clone();
+    ui.window().on_close_requested(move || {
+        if !(has_tray && close_config.settings().close_to_tray) {
+            let _ = slint::quit_event_loop();
+        }
+        slint::CloseRequestResponse::HideWindow
     });
     let timer = slint::Timer::default();
     {
@@ -122,14 +166,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.apply(bridge.drain());
         });
     }
-    ui.run()?;
+    ui.show()?;
+    slint::run_event_loop_until_quit()?;
 
     // Pause what is running and save it before exiting.
     drop(timer);
-    if let Ok(bridge) = Rc::try_unwrap(bridge) {
-        bridge.shutdown();
-    }
+    drop(tray);
+    bridge.shutdown();
     Ok(())
+}
+
+/// Shows the main window, also if it was closed to the tray or minimized.
+fn show_main(ui: &AppWindow) {
+    if let Err(error) = ui.show() {
+        eprintln!("velo: couldn't show the window: {error}");
+    }
+    ui.window().set_minimized(false);
 }
 
 #[cfg(test)]

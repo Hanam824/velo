@@ -42,6 +42,11 @@ impl AppDirs {
         })
     }
 
+    /// The data folder, which holds the download database.
+    pub fn data(&self) -> &Path {
+        &self.data
+    }
+
     /// The download database, `velo.db` in the data folder.
     pub fn database(&self) -> PathBuf {
         self.data.join("velo.db")

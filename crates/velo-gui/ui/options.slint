@@ -39,6 +39,7 @@ export component OptionsWindow inherits Window {
     // Downloads.
     in-out property <bool> show-progress;
     in-out property <bool> show-complete;
+    in-out property <bool> close-to-tray;
     in-out property <string> user-agent;
     in property <string> default-user-agent;
     // Connection.
@@ -137,6 +138,10 @@ export component OptionsWindow inherits Window {
                     CheckBox {
                         text: "Show the Download complete dialog";
                         checked <=> root.show-complete;
+                    }
+                    CheckBox {
+                        text: "Keep Velo running in the tray when the window is closed";
+                        checked <=> root.close-to-tray;
                     }
                     Labelled {
                         label: "User agent:";

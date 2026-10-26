@@ -6,11 +6,13 @@
 mod dialogs;
 mod dirs;
 mod files;
+mod notify;
 mod power;
 
 pub use dialogs::{pick_folder, pick_save_path};
 pub use dirs::AppDirs;
 pub use files::{open, reveal};
+pub use notify::notify;
 pub use power::shutdown;
 
 /// Errors from OS integration.
@@ -27,6 +29,9 @@ pub enum Error {
         /// What the system said.
         message: String,
     },
+    /// The system didn't take a notification.
+    #[error("couldn't show a notification: {0}")]
+    Notify(String),
     /// A system command failed to start or reported failure.
     #[error("couldn't run {command}: {message}")]
     Command {
