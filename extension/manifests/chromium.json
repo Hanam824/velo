@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "Velo Download Manager",
+  "version": "0.0.0",
+  "description": "Hands downloads and YouTube videos to Velo Download Manager.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1RAgK5qgBeHviiFDG3TY50SKW/VM3XcedAx4vW/x2MKtKZx6Cqsmx8GbTMW/4G5O3mRJeIdGL0prXSeVX7+Z1dsJEm9fE7mNo4vCrTrmaDpNpEsA6xbc59WR6auSw4WP9FMxIjbqYuB6+65e8qfMEPstbrACseVMET3NEtsrfZhj04ciCJY/x60OwRJskt5PrBWpAXN0BTNYYXbO4ItG/4EVLhr5xl0/pylJZ10PxpvSNC0UqrpQdMh9CeuFcP/CmV8t0JihgpAATPKcQtkXj5FtMDTzwt4D8gBEt5ERNRSk1L+IOmYZYkN8XttEJ7ETfIgpNN62huYNcwi3IS3hbQIDAQAB",
+  "icons": {
+    "16": "icons/velo-16.png",
+    "32": "icons/velo-32.png",
+    "48": "icons/velo-48.png",
+    "128": "icons/velo-128.png"
+  },
+  "permissions": [
+    "contextMenus",
+    "cookies",
+    "downloads",
+    "nativeMessaging",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Velo Download Manager",
+    "default_icon": {
+      "16": "icons/velo-16.png",
+      "32": "icons/velo-32.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*",
+        "https://music.youtube.com/*"
+      ],
+      "js": [
+        "youtube.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "bypass.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

@@ -92,6 +92,39 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  # The browser extension (extension/): type check, unit tests and a build of every browser's
+  # bundle. Platform-independent, so it runs once.
+  extension:
+    name: Browser extension
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type check
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
   # Licenses, security advisories and duplicate versions of the dependencies (deny.toml). Runs on
   # every pull request, docs-only included: it's quick and an advisory can appear at any time.
   deny:
@@ -109,7 +142,7 @@ jobs:
   # reports under its unexpanded name.
   result:
     name: CI result
-    needs: [changes, build, deny]
+    needs: [changes, build, extension, deny]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -117,11 +150,14 @@ jobs:
         env:
           CHANGES: ${{ needs.changes.result }}
           BUILD: ${{ needs.build.result }}
+          EXTENSION: ${{ needs.extension.result }}
           DENY: ${{ needs.deny.result }}
         run: |
-          echo "changes: $CHANGES, build: $BUILD, deny: $DENY"
+          echo "changes: $CHANGES, build: $BUILD, extension: $EXTENSION, deny: $DENY"
           if [ "$CHANGES" != "success" ] || [ "$DENY" != "success" ]; then exit 1; fi
-          case "$BUILD" in
-            success | skipped) ;;
-            *) exit 1 ;;
-          esac
+          for job in "$BUILD" "$EXTENSION"; do
+            case "$job" in
+              success | skipped) ;;
+              *) exit 1 ;;
+            esac
+          done

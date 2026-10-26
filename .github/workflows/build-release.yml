@@ -27,6 +27,36 @@ permissions:
   contents: read
 
 jobs:
+  # The browser extension, zipped once per browser for loading or submitting to a store
+  # (artifact `velo-extension`). The same for every platform.
+  extension:
+    name: Build the browser extension
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Build and zip
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./scripts/package-extension.sh "$VERSION"
+
+      - name: Upload the extension
+        uses: actions/upload-artifact@v7
+        with:
+          name: velo-extension
+          path: dist/velo-*-extension-*.zip
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.name }}
     strategy:
