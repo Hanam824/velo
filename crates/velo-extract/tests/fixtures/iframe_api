@@ -1,0 +1,1 @@
+var scriptUrl = 'https:\/\/www.youtube.com\/s\/player\/a1b2c3d4\/www-widgetapi.vflset\/www-widgetapi.js';try{var ttPolicy=window.trustedTypes.createPolicy("youtube-widget-api",{createScriptURL:function(x){return x}});scriptUrl=ttPolicy.createScriptURL(scriptUrl)}catch(e){}
