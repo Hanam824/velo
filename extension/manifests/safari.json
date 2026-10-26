@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Velo Download Manager",
+  "version": "0.0.0",
+  "description": "Hands downloads and YouTube videos to Velo Download Manager.",
+  "browser_specific_settings": {
+    "safari": {
+      "strict_min_version": "16.4"
+    }
+  },
+  "icons": {
+    "16": "icons/velo-16.png",
+    "32": "icons/velo-32.png",
+    "48": "icons/velo-48.png",
+    "128": "icons/velo-128.png"
+  },
+  "permissions": [
+    "contextMenus",
+    "cookies",
+    "nativeMessaging",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Velo Download Manager",
+    "default_icon": {
+      "16": "icons/velo-16.png",
+      "32": "icons/velo-32.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*",
+        "https://music.youtube.com/*"
+      ],
+      "js": [
+        "youtube.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "bypass.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

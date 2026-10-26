@@ -151,15 +151,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Messages from other processes wait here for the UI thread, which takes them on its timer.
     let (requests_tx, requests) = std::sync::mpsc::channel();
-    velo_ipc::listen(&endpoint, move |message| {
-        if let velo_ipc::Message::Add { url, .. } = &message
-            && !is_download_url(url)
-        {
-            return Err(format!("{url} isn't an http or https address"));
-        }
-        requests_tx
-            .send(message)
-            .map_err(|_| "Velo is closing".to_string())
+    let in_app = InApp {
+        requests: requests_tx,
+        extractor: bridge.extractor().clone(),
+        runtime: bridge.runtime().clone(),
+        settings: dirs.settings(),
+    };
+    velo_ipc::listen(&endpoint, move |message| match message {
+        velo_ipc::Message::Native { request } => Ok(Some(velo_nmh::answer(request, &in_app))),
+        message => velo_nmh::Backend::send(&in_app, message).map(|()| None),
     })?;
     register_browser_host(dirs.data());
     let tray = match VeloTray::new() {
@@ -235,6 +235,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(tray);
     bridge.shutdown();
     Ok(())
+}
+
+/// The browser extension's requests answered inside the app, as `velo-nmh` answers them; for
+/// Safari's extension, which reaches the app over its socket. Runs on the socket's thread.
+struct InApp {
+    /// Where requests for the UI thread go; its timer takes them.
+    requests: std::sync::mpsc::Sender<velo_ipc::Message>,
+    extractor: velo_extract::Extractor,
+    runtime: tokio::runtime::Handle,
+    /// The settings file, read for the capture list.
+    settings: std::path::PathBuf,
+}
+
+impl velo_nmh::Backend for InApp {
+    fn send(&self, message: velo_ipc::Message) -> Result<(), String> {
+        if let velo_ipc::Message::Add { url, .. } = &message
+            && !is_download_url(url)
+        {
+            return Err(format!("{url} isn't an http or https address"));
+        }
+        self.requests
+            .send(message)
+            .map_err(|_| "Velo is closing".to_string())
+    }
+
+    fn video(&self, url: &str) -> Result<velo_extract::Video, String> {
+        self.runtime
+            .block_on(self.extractor.video_at(url))
+            .map_err(|e| e.to_string())
+    }
+
+    fn capture_extensions(&self) -> Vec<String> {
+        velo_store::load_settings(&self.settings)
+            .map(|s| s.capture_extensions)
+            .unwrap_or_default()
+    }
 }
 
 /// Tells the browsers where `velo-nmh` is, if it is next to the app, so Velo's extension can
@@ -330,6 +366,8 @@ fn handle_request(
         velo_ipc::Message::StartQueue { queue } => {
             commands.start_queue(queue.unwrap_or(velo_core::QueueId::MAIN));
         }
+        // Answered on the socket's thread.
+        velo_ipc::Message::Native { .. } => {}
     }
 }
 

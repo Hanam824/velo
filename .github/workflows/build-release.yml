@@ -57,6 +57,36 @@ jobs:
           path: dist/velo-*-extension-*.zip
           if-no-files-found: error
 
+  # The Safari app that carries the extension (artifact `velo-safari-extension`), for Apple
+  # Silicon and Intel in one app.
+  safari:
+    name: Build the Safari extension
+    runs-on: macos-latest
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Build and zip
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./scripts/build-safari.sh "$VERSION"
+
+      - name: Upload the app
+        uses: actions/upload-artifact@v7
+        with:
+          name: velo-safari-extension
+          path: dist/velo-*-safari-extension-macos.zip
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.name }}
     strategy:

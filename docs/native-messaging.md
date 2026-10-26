@@ -15,6 +15,11 @@ Only browsers whose profile folder exists get a manifest on macOS and Linux. The
 allow the extension IDs `knncpmilkobjkfcjafpleodokkhcaing` (Chromium; fixed by the public key in
 the extension's manifest) and `velo@hanam824.github.io` (Firefox).
 
+Safari is different: its extension's native side is a handler inside "Velo Safari Extension.app"
+(`extension/safari/SafariWebExtensionHandler.swift`), sandboxed and unable to start `velo-nmh`.
+It sends each request to the Velo app as an IPC `native` message on the app's socket, and the app
+answers it with the same code (`velo_nmh::answer`), starting the app first if needed.
+
 ## Messages
 
 Each message is JSON preceded by its length as a 32-bit number in the machine's byte order, at

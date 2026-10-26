@@ -43,6 +43,27 @@ Firefox needs version 128 or later (the ESR). Its manifest uses an event page
 (`background.scripts`) instead of a service worker and names the add-on `velo@hanam824.github.io`,
 the ID Velo's host manifest allows.
 
+## Safari
+
+Safari runs extensions from inside a macOS app: `scripts/build-safari.sh` (needs Xcode) builds
+"Velo Safari Extension.app" from `dist/safari` with Apple's converter, puts in Velo's native
+handler (`safari/SafariWebExtensionHandler.swift`) and its sandbox exception
+(`safari/Extension.entitlements`), and zips it. Releases attach it as
+`velo-<version>-safari-extension-macos.zip`.
+
+The Safari extension can't start `velo-nmh`, so its handler sends each native message to the
+Velo app over the app's socket (`/tmp/velo-<hash>.sock`, the same name the app computes), and the
+app answers it as `velo-nmh` would; if the app isn't running, the handler starts it. Safari has
+no downloads API, so there is no download capture in Safari: only "Download with Velo" in the
+context menu and the YouTube button.
+
+The app is signed ad hoc, not with a Developer ID, so Safari runs it only after:
+
+1. Unzip it and move "Velo Safari Extension.app" to Applications, then open it once.
+2. In Safari, Settings → Advanced: turn on **Show features for web developers**.
+3. Develop → **Allow Unsigned Extensions** (asked again after each Safari restart).
+4. Settings → Extensions: turn on **Velo Download Manager** and allow it on the sites you want.
+
 ## Extension IDs
 
 The Chromium manifest's `key` fixes the extension ID to `knncpmilkobjkfcjafpleodokkhcaing`, the one Velo's

@@ -80,10 +80,18 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queue: Option<QueueId>,
     },
+    /// A request of the browser extension's native-messaging protocol (see
+    /// `docs/native-messaging.md`), for the app to answer as `velo-nmh` would; sent by
+    /// Safari's extension, which can't start `velo-nmh`. The reply carries the answer.
+    Native {
+        /// The request, such as `{"type": "list_formats", "url": "…"}`.
+        request: serde_json::Value,
+    },
 }
 
-/// The app's answer to a [`Message`]: `Ok` if it took it, or why it refused it.
-pub type Reply = std::result::Result<(), String>;
+/// The app's answer to a [`Message`]: `Ok` with what it has to say back (most messages have
+/// nothing), or why it refused it.
+pub type Reply = std::result::Result<Option<serde_json::Value>, String>;
 
 /// A message as sent over the socket: the protocol version and the message.
 #[derive(Debug, Serialize, Deserialize)]
@@ -100,6 +108,8 @@ struct ReplyLine {
     ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answer: Option<serde_json::Value>,
 }
 
 /// Where the running app listens: one place per user, so two users on one computer each get
@@ -149,6 +159,11 @@ pub fn is_running(endpoint: &Endpoint) -> bool {
 /// Fails with [`Error::NotRunning`] if nothing listens there, and with [`Error::Refused`] if
 /// the app refused the message.
 pub fn send(endpoint: &Endpoint, message: &Message) -> Result<()> {
+    ask(endpoint, message).map(|_| ())
+}
+
+/// Like [`send`], and returns what the app answered, if anything.
+pub fn ask(endpoint: &Endpoint, message: &Message) -> Result<Option<serde_json::Value>> {
     let stream = match Stream::connect(endpoint.name()?) {
         Ok(stream) => stream,
         Err(e)
@@ -171,10 +186,7 @@ pub fn send(endpoint: &Endpoint, message: &Message) -> Result<()> {
     )?;
     let mut line = String::new();
     stream.read_line(&mut line)?;
-    match parse_reply(&line)? {
-        Ok(()) => Ok(()),
-        Err(reason) => Err(Error::Refused(reason)),
-    }
+    parse_reply(&line)?.map_err(Error::Refused)
 }
 
 /// Writes `value` as one line of JSON.
@@ -215,15 +227,22 @@ pub fn listen(
                 let reply = parse(&line)
                     .map_err(|error| error.to_string())
                     .and_then(&on_message);
-                // The sender may have gone; it then doesn't need the answer.
-                let _ = write_line(
-                    stream.get_mut(),
-                    &ReplyLine {
+                let line = match reply {
+                    Ok(answer) => ReplyLine {
                         version: VERSION,
-                        ok: reply.is_ok(),
-                        error: reply.err(),
+                        ok: true,
+                        error: None,
+                        answer,
                     },
-                );
+                    Err(error) => ReplyLine {
+                        version: VERSION,
+                        ok: false,
+                        error: Some(error),
+                        answer: None,
+                    },
+                };
+                // The sender may have gone; it then doesn't need the answer.
+                let _ = write_line(stream.get_mut(), &line);
             }
         })?;
     Ok(thread)
@@ -246,12 +265,12 @@ fn parse(line: &str) -> Result<Message> {
 /// which counts as taken.
 fn parse_reply(line: &str) -> Result<Reply> {
     if line.trim().is_empty() {
-        return Ok(Ok(()));
+        return Ok(Ok(None));
     }
     let reply: ReplyLine =
         serde_json::from_str(line.trim()).map_err(|e| Error::Malformed(e.to_string()))?;
     Ok(if reply.ok {
-        Ok(())
+        Ok(reply.answer)
     } else {
         Err(reply.error.unwrap_or_default())
     })
@@ -295,7 +314,11 @@ mod tests {
             parse(r#"{"version":1,"type":"start_queue"}"#).unwrap(),
             Message::StartQueue { queue: None }
         );
-        assert_eq!(parse_reply("").unwrap(), Ok(()));
+        assert_eq!(parse_reply("").unwrap(), Ok(None));
+        assert_eq!(
+            parse_reply(r#"{"version":1,"ok":true,"answer":{"type":"hello"}}"#).unwrap(),
+            Ok(Some(serde_json::json!({"type": "hello"})))
+        );
         assert_eq!(
             parse_reply(r#"{"version":1,"ok":false,"error":"no"}"#).unwrap(),
             Err("no".into())
@@ -314,11 +337,13 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         listen(&endpoint, move |message| {
             let refused = matches!(message, Message::StartQueue { .. });
+            let answer = matches!(message, Message::Native { .. })
+                .then(|| serde_json::json!({"type": "hello"}));
             let _ = tx.send(message);
             if refused {
                 Err("no such queue".into())
             } else {
-                Ok(())
+                Ok(answer)
             }
         })
         .unwrap();
@@ -346,6 +371,13 @@ mod tests {
             send(&endpoint, &start),
             Err(Error::Refused(reason)) if reason == "no such queue"
         ));
+        let native = Message::Native {
+            request: serde_json::json!({"type": "hello"}),
+        };
+        assert_eq!(
+            ask(&endpoint, &native).unwrap(),
+            Some(serde_json::json!({"type": "hello"}))
+        );
     }
 
     #[test]

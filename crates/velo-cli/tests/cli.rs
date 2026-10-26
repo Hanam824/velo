@@ -143,7 +143,7 @@ fn a_running_app_gets_the_request_and_headless_is_refused() {
     let (tx, rx) = mpsc::channel();
     velo_ipc::listen(&Endpoint::for_data_dir(&places.data), move |message| {
         let _ = tx.send(message);
-        Ok(())
+        Ok(None)
     })
     .unwrap();
 
