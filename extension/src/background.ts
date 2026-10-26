@@ -2,6 +2,7 @@
 // downloads of the file types Velo captures, adds "Download with Velo" to link menus, and
 // answers the YouTube button's questions.
 
+import { ext } from "./api.ts";
 import { baseName, cookieHeader, shouldCapture } from "./capture.ts";
 import { type Answer, HOST, type PageRequest, type Request, failure, isCompatible } from "./protocol.ts";
 
@@ -26,20 +27,20 @@ interface State {
 const DEFAULT_STATE: State = { enabled: true, extensions: [], checkedAt: 0, bypassUntil: 0 };
 
 async function state(): Promise<State> {
-  const stored = await chrome.storage.local.get("state");
+  const stored = await ext.storage.local.get("state");
   return { ...DEFAULT_STATE, ...(stored.state as Partial<State> | undefined) };
 }
 
 async function update(change: Partial<State>): Promise<State> {
   const next = { ...(await state()), ...change };
-  await chrome.storage.local.set({ state: next });
+  await ext.storage.local.set({ state: next });
   return next;
 }
 
 /** Sends `request` to Velo's host; `undefined` if the host isn't installed or failed. */
 async function ask(request: Request): Promise<Answer | undefined> {
   try {
-    return (await chrome.runtime.sendNativeMessage(HOST, request)) as Answer;
+    return (await ext.runtime.sendNativeMessage(HOST, request)) as Answer;
   } catch (error) {
     console.warn("Velo: the native host didn't answer", error);
     return undefined;
@@ -57,15 +58,15 @@ async function refresh(force = false): Promise<State> {
 
 /** Shows whether capturing is off on the toolbar button. */
 async function showEnabled(enabled: boolean): Promise<void> {
-  await chrome.action.setBadgeText({ text: enabled ? "" : "off" });
-  await chrome.action.setTitle({
+  await ext.action.setBadgeText({ text: enabled ? "" : "off" });
+  await ext.action.setTitle({
     title: enabled ? "Velo Download Manager: capturing downloads" : "Velo Download Manager: not capturing",
   });
 }
 
 /** Hands `url` to Velo with the cookies the browser has for it; `false` if Velo refused. */
 async function handOff(url: string, referer?: string, fileName?: string): Promise<boolean> {
-  const cookies = cookieHeader(await chrome.cookies.getAll({ url }).catch(() => []));
+  const cookies = cookieHeader(await ext.cookies.getAll({ url }).catch(() => []));
   const answer = await ask({ type: "download", url, referer, cookies, file_name: fileName });
   const error = failure(answer);
   if (error !== undefined) console.warn(`Velo: couldn't hand over ${url}: ${error}`);
@@ -75,25 +76,25 @@ async function handOff(url: string, referer?: string, fileName?: string): Promis
 /** Downloads Velo gave back to the browser, which mustn't be captured again. */
 const returned = new Set<string>();
 
-chrome.downloads.onCreated.addListener(async (item) => {
+ext.downloads.onCreated.addListener(async (item) => {
   const url = item.finalUrl || item.url;
-  if (returned.delete(url) || item.byExtensionId === chrome.runtime.id) return;
+  if (returned.delete(url) || item.byExtensionId === ext.runtime.id) return;
   const current = await refresh();
   const bypass = Date.now() < current.bypassUntil;
   if (!current.enabled || !shouldCapture({ url, filename: item.filename }, current.extensions, bypass)) {
     return;
   }
-  await chrome.downloads.cancel(item.id).catch(() => undefined);
-  await chrome.downloads.erase({ id: item.id }).catch(() => undefined);
+  await ext.downloads.cancel(item.id).catch(() => undefined);
+  await ext.downloads.erase({ id: item.id }).catch(() => undefined);
   if (!(await handOff(url, item.referrer || undefined, baseName(item.filename)))) {
     // Velo couldn't take it: let the browser download it after all.
     returned.add(url);
-    await chrome.downloads.download({ url });
+    await ext.downloads.download({ url });
   }
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
+ext.runtime.onInstalled.addListener(() => {
+  ext.contextMenus.create({
     id: "velo-download",
     title: "Download with Velo",
     contexts: ["link", "video", "audio", "image"],
@@ -101,22 +102,22 @@ chrome.runtime.onInstalled.addListener(() => {
   void refresh(true);
 });
 
-chrome.runtime.onStartup.addListener(async () => {
+ext.runtime.onStartup.addListener(async () => {
   const current = await refresh(true);
   await showEnabled(current.enabled);
 });
 
-chrome.contextMenus.onClicked.addListener((info) => {
+ext.contextMenus.onClicked.addListener((info) => {
   const url = info.linkUrl ?? info.srcUrl;
   if (url) void handOff(url, info.pageUrl);
 });
 
-chrome.action.onClicked.addListener(async () => {
+ext.action.onClicked.addListener(async () => {
   const current = await update({ enabled: !(await state()).enabled });
   await showEnabled(current.enabled);
 });
 
-chrome.runtime.onMessage.addListener((message: PageRequest, _sender, respond) => {
+ext.runtime.onMessage.addListener((message: PageRequest, _sender, respond) => {
   switch (message.type) {
     case "bypass":
       void update({ bypassUntil: Date.now() + BYPASS_MS });
