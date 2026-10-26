@@ -1,0 +1,56 @@
+{
+  "playabilityStatus": { "status": "OK", "playableInEmbed": true },
+  "videoDetails": {
+    "videoId": "okokokokok1",
+    "title": "Velo test video",
+    "author": "Velo",
+    "lengthSeconds": "212",
+    "isLiveContent": false
+  },
+  "streamingData": {
+    "expiresInSeconds": "21540",
+    "formats": [
+      {
+        "itag": 18,
+        "url": "https://media.test/videoplayback?itag=18&id=okokokokok1",
+        "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+        "bitrate": 503000,
+        "width": 640,
+        "height": 360,
+        "fps": 30,
+        "contentLength": "13330000",
+        "qualityLabel": "360p",
+        "audioSampleRate": "44100"
+      }
+    ],
+    "adaptiveFormats": [
+      {
+        "itag": 137,
+        "url": "https://media.test/videoplayback?itag=137&id=okokokokok1",
+        "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+        "bitrate": 4400000,
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "contentLength": "92000000",
+        "qualityLabel": "1080p"
+      },
+      {
+        "itag": 140,
+        "url": "https://media.test/videoplayback?itag=140&id=okokokokok1",
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+        "bitrate": 130000,
+        "contentLength": "3430000",
+        "audioQuality": "AUDIO_QUALITY_MEDIUM",
+        "audioSampleRate": "44100"
+      },
+      {
+        "itag": 251,
+        "signatureCipher": "s=AAAA&sp=sig&url=https%3A%2F%2Fmedia.test%2Fvideoplayback%3Fitag%3D251",
+        "mimeType": "audio/webm; codecs=\"opus\"",
+        "bitrate": 140000,
+        "audioSampleRate": "48000"
+      }
+    ]
+  }
+}
