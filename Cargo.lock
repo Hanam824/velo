@@ -6266,6 +6266,7 @@ dependencies = [
  "tokio",
  "velo-core",
  "velo-engine",
+ "velo-extract",
  "velo-ipc",
  "velo-platform",
  "velo-store",
@@ -6276,6 +6277,7 @@ name = "velo-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -6311,6 +6313,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "velo-core",
  "velo-engine",
 ]
 
@@ -6327,6 +6330,7 @@ dependencies = [
  "tokio",
  "velo-core",
  "velo-engine",
+ "velo-extract",
  "velo-ipc",
  "velo-platform",
  "velo-store",
@@ -6361,6 +6365,7 @@ name = "velo-store"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "toml",

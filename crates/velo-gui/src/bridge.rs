@@ -9,15 +9,16 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 
 use tokio::sync::{broadcast, oneshot};
-use velo_core::{Download, EngineEvent, Queue, Settings};
+use velo_core::{Download, EngineEvent, Queue, Resolver, Settings};
 use velo_engine::{Credentials, Engine, EngineConfig, RequestOptions, RetryPolicy};
+use velo_extract::Extractor;
 use velo_store::Store;
 
-use crate::add::{ProbeDone, Prober};
+use crate::add::{ProbeDone, Prober, VideoDone};
 
 /// What the bridge needs to start the engine.
 pub struct BridgeConfig {
@@ -27,6 +28,8 @@ pub struct BridgeConfig {
     pub settings: Settings,
     /// How failed requests are retried.
     pub retry: RetryPolicy,
+    /// Folder for YouTube's player scripts.
+    pub player_cache: PathBuf,
     /// The database to keep the download list in.
     pub store: Store,
     /// Downloads restored from the store.
@@ -38,6 +41,8 @@ pub struct BridgeConfig {
 /// The running engine thread.
 pub struct Bridge {
     engine: Engine,
+    /// Asks YouTube about videos, and works out the current addresses of YouTube downloads.
+    extractor: Extractor,
     runtime: tokio::runtime::Handle,
     events: mpsc::Receiver<EngineEvent>,
     stop: RefCell<Option<oneshot::Sender<()>>>,
@@ -59,10 +64,17 @@ impl Bridge {
             temp_dir,
             settings,
             retry,
+            player_cache,
             store,
             downloads,
             queues,
         } = config;
+        let extractor = Extractor::new(
+            velo_engine::client_with(&settings, &RequestOptions::default())
+                .map_err(std::io::Error::other)?,
+        )
+        .with_cache_dir(player_cache);
+        let resolver: Arc<dyn Resolver> = Arc::new(extractor.clone());
 
         let thread = std::thread::Builder::new()
             .name("velo-runtime".into())
@@ -72,6 +84,7 @@ impl Bridge {
                         temp_dir,
                         settings,
                         retry,
+                        resolver: Some(resolver),
                     };
                     let engine = match Engine::start(config, downloads, queues) {
                         Ok(engine) => engine,
@@ -106,6 +119,7 @@ impl Bridge {
             .map_err(std::io::Error::other)?;
         Ok(Self {
             engine,
+            extractor,
             runtime: handle,
             events,
             stop: RefCell::new(Some(stop)),
@@ -140,6 +154,8 @@ impl Bridge {
 thread_local! {
     /// Probe callbacks waiting on the UI thread for their result, by ticket.
     static WAITING: RefCell<HashMap<u64, ProbeDone>> = RefCell::default();
+    /// Video callbacks waiting on the UI thread for their result, by ticket.
+    static WAITING_VIDEOS: RefCell<HashMap<u64, VideoDone>> = RefCell::default();
 }
 
 /// Numbers probe tickets.
@@ -170,6 +186,22 @@ impl Prober for Bridge {
             };
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(done) = WAITING.with(|waiting| waiting.borrow_mut().remove(&ticket)) {
+                    done(result);
+                }
+            });
+        });
+    }
+
+    /// Asks YouTube on the runtime, then hands the result back to the UI thread.
+    fn video(&self, url: String, done: VideoDone) {
+        let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
+        WAITING_VIDEOS.with(|waiting| waiting.borrow_mut().insert(ticket, done));
+        let extractor = self.extractor.clone();
+        self.runtime.spawn(async move {
+            let result = extractor.video_at(&url).await.map_err(|e| e.to_string());
+            let _ = slint::invoke_from_event_loop(move || {
+                let done = WAITING_VIDEOS.with(|waiting| waiting.borrow_mut().remove(&ticket));
+                if let Some(done) = done {
                     done(result);
                 }
             });
@@ -260,6 +292,7 @@ mod tests {
                 max_retries: 0,
                 ..RetryPolicy::default()
             },
+            player_cache: dir.path().join("player-cache"),
             store: Store::open(&database).unwrap(),
             downloads,
             queues: Vec::new(),
@@ -275,6 +308,7 @@ mod tests {
             description: "unreachable".into(),
             start: true,
             request: RequestOptions::default(),
+            source: None,
         });
         wait_for(
             &bridge,

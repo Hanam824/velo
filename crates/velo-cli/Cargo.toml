@@ -16,6 +16,7 @@ clap.workspace = true
 thiserror.workspace = true
 velo-core.workspace = true
 velo-engine.workspace = true
+velo-extract.workspace = true
 velo-ipc.workspace = true
 velo-platform.workspace = true
 velo-store.workspace = true

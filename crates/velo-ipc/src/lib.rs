@@ -63,6 +63,10 @@ pub enum Message {
         start: bool,
         /// Add it without asking; otherwise the app shows Download File Info first.
         silent: bool,
+        /// For a YouTube address added without asking: the format (itag) to download; the
+        /// best video with sound if `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        itag: Option<u32>,
     },
     /// Start a queue: `queue`, or the main queue if `None`.
     StartQueue {
@@ -276,6 +280,7 @@ mod tests {
                 file_name: None,
                 start: true,
                 silent: false,
+                itag: None,
             }
         );
         assert_eq!(
@@ -320,6 +325,7 @@ mod tests {
             file_name: Some("y.zip".into()),
             start: false,
             silent: true,
+            itag: Some(18),
         };
         send(&endpoint, &add).unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), add);

@@ -56,6 +56,8 @@ const MIGRATIONS: &[&str] = &[
         download_id INTEGER NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
         PRIMARY KEY (queue_id, position)
     );",
+    // 3: where an expiring address comes from, as JSON (velo_core::Source).
+    "ALTER TABLE downloads ADD COLUMN source TEXT;",
 ];
 
 /// The download list on disk.
@@ -105,7 +107,7 @@ impl Store {
     pub fn load_downloads(&self) -> Result<Vec<Download>> {
         let mut statement = self.connection.prepare(
             "SELECT id, url, file_name, save_dir, total_size, resumable, etag, last_modified,
-                    category, description, state, error, added_at, last_try_at
+                    category, description, state, error, added_at, last_try_at, source
              FROM downloads ORDER BY id",
         )?;
         let mut downloads = statement
@@ -295,15 +297,15 @@ fn write_download(transaction: &Transaction<'_>, download: &Download) -> Result<
         // to the download's place in its queues.
         "INSERT INTO downloads
             (id, url, file_name, save_dir, total_size, resumable, etag, last_modified,
-             category, description, state, error, added_at, last_try_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             category, description, state, error, added_at, last_try_at, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT (id) DO UPDATE SET
             url = excluded.url, file_name = excluded.file_name, save_dir = excluded.save_dir,
             total_size = excluded.total_size, resumable = excluded.resumable,
             etag = excluded.etag, last_modified = excluded.last_modified,
             category = excluded.category, description = excluded.description,
             state = excluded.state, error = excluded.error, added_at = excluded.added_at,
-            last_try_at = excluded.last_try_at",
+            last_try_at = excluded.last_try_at, source = excluded.source",
         params![
             download.id.0 as i64,
             download.url,
@@ -319,6 +321,10 @@ fn write_download(transaction: &Transaction<'_>, download: &Download) -> Result<
             error,
             download.added_at,
             download.last_try_at,
+            download
+                .source
+                .as_ref()
+                .map(|s| serde_json::to_string(s).expect("a source serializes")),
         ],
     )?;
     transaction.execute(
@@ -350,6 +356,14 @@ fn download_from_row(row: &Row<'_>) -> rusqlite::Result<Result<Download>> {
         Ok(state) => state,
         Err(e) => return Ok(Err(e)),
     };
+    let source = match row
+        .get::<_, Option<String>>(14)?
+        .map(|json| serde_json::from_str(&json))
+    {
+        None => None,
+        Some(Ok(source)) => Some(source),
+        Some(Err(e)) => return Ok(Err(Error::UnknownValue(format!("download source: {e}")))),
+    };
     Ok(Ok(Download {
         id: DownloadId(row.get::<_, i64>(0)? as u64),
         url: row.get(1)?,
@@ -365,6 +379,7 @@ fn download_from_row(row: &Row<'_>) -> rusqlite::Result<Result<Download>> {
         segments: Vec::new(),
         added_at: row.get(12)?,
         last_try_at: row.get(13)?,
+        source,
     }))
 }
 
@@ -551,7 +566,41 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn a_version_two_database_keeps_its_downloads_and_gains_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("velo.db");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(MIGRATIONS[0]).unwrap();
+            connection.execute_batch(MIGRATIONS[1]).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO downloads (id, url, file_name, save_dir, resumable, description, state)
+                     VALUES (4, 'http://example.test/old.zip', 'old.zip', '/d', 1, '', 'queued')",
+                    [],
+                )
+                .unwrap();
+            connection.pragma_update(None, "user_version", 2).unwrap();
+        }
+        let mut store = Store::open(&path).unwrap();
+        let old = store.load_downloads().unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(
+            (old[0].url.as_str(), &old[0].source),
+            ("http://example.test/old.zip", &None)
+        );
+
+        let mut video = sample(5);
+        video.source = Some(velo_core::Source::YouTube {
+            video_id: "dQw4w9WgXcQ".into(),
+            itags: vec![137, 140],
+        });
+        store.save_download(&video).unwrap();
+        assert_eq!(store.load_downloads().unwrap()[1], video);
     }
 
     #[test]

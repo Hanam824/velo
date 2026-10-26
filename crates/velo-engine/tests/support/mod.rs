@@ -23,6 +23,8 @@
 //!   [`PASSWORD`]; `401` otherwise.
 //! - `/headers/{name}`: like `/files`, but only with `Referer` [`REFERER`] and `Cookie`
 //!   [`COOKIES`]; `403` otherwise.
+//! - `/capped/{name}`: like `/files`, but answers `403` to a range longer than [`CAP`] bytes,
+//!   as YouTube does.
 //! - anything else: `404`.
 
 #![allow(dead_code)]
@@ -68,6 +70,9 @@ pub fn body() -> Vec<u8> {
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
         .collect()
 }
+
+/// The longest range `/capped` serves.
+pub const CAP: u64 = 64 * 1024;
 
 /// Size of `/big`.
 pub const BIG_SIZE: usize = 8 * 1024 * 1024;
@@ -118,6 +123,25 @@ pub async fn start() -> String {
     let version = Arc::new(AtomicUsize::new(0));
     let bump = Arc::clone(&version);
     let app = Router::new()
+        .route(
+            "/capped/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                let asked = headers
+                    .get(RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("bytes="))
+                    .and_then(|v| v.split_once('-'))
+                    .map(|(from, to)| {
+                        let from: u64 = from.parse().unwrap_or(0);
+                        let to: u64 = to.parse().unwrap_or(SIZE as u64 - 1);
+                        to + 1 - from
+                    });
+                if asked.is_some_and(|len| len > CAP) {
+                    return status(StatusCode::FORBIDDEN);
+                }
+                serve(&method, &headers, &body(), true, &[])
+            }),
+        )
         .route(
             "/files/{name}",
             get(|method: Method, headers: HeaderMap| async move {

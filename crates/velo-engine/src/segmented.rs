@@ -36,6 +36,10 @@ pub struct Options {
     pub retry_delay: Duration,
     /// Speed limits every chunk must pass, such as the global one and the download's own.
     pub limiters: Vec<Limiter>,
+    /// The most bytes one request asks for; a longer segment is fetched in several requests
+    /// over the same connection. Some servers (such as YouTube's) slow down or refuse longer
+    /// ranges. No cap if `None`.
+    pub max_request_size: Option<u64>,
 }
 
 impl Default for Options {
@@ -47,6 +51,7 @@ impl Default for Options {
             max_retries: 5,
             retry_delay: Duration::from_secs(1),
             limiters: Vec::new(),
+            max_request_size: None,
         }
     }
 }
@@ -267,37 +272,65 @@ impl Worker {
             return Ok(());
         }
         file.seek(SeekFrom::Start(have)).await?;
-
-        let mut response = cancellable(
-            &self.stop,
-            send_range(&self.client, &self.url, position, Some(end)),
-        )
-        .await?;
         let mut writer = BufWriter::new(file);
         loop {
-            let chunk = match cancellable(&self.stop, async { Ok(response.chunk().await?) }).await {
-                Ok(Some(chunk)) => chunk,
-                Ok(None) => break,
+            let (position, end) = self.progress.update(id, |s| (s.position(), s.end));
+            let request_end = match self.options.max_request_size {
+                Some(max) => end.min(position.saturating_add(max.max(1))),
+                None => end,
+            };
+            match self
+                .fetch_request(id, &mut writer, position, request_end)
+                .await
+            {
+                Ok(true) => {
+                    writer.flush().await?;
+                    return Ok(());
+                }
+                Ok(false) => {}
                 Err(error) => {
                     // Keep what was counted on disk, so the part file stays the truth.
                     writer.flush().await?;
                     return Err(error);
                 }
+            }
+        }
+    }
+
+    /// Fetches bytes `[position, request_end)` of segment `id` with one request into
+    /// `writer`. Returns `true` once the segment is done (its end may have shrunk meanwhile)
+    /// and `false` when this request's range is in but the segment isn't.
+    async fn fetch_request(
+        &self,
+        id: SegmentId,
+        writer: &mut BufWriter<tokio::fs::File>,
+        position: u64,
+        request_end: u64,
+    ) -> Result<bool> {
+        let mut response = cancellable(
+            &self.stop,
+            send_range(&self.client, &self.url, position, Some(request_end)),
+        )
+        .await?;
+        let mut left = request_end - position;
+        while left > 0 {
+            let Some(chunk) =
+                cancellable(&self.stop, async { Ok(response.chunk().await?) }).await?
+            else {
+                break;
             };
-            let wanted = (chunk.len() as u64).min(self.progress.update(id, |s| s.remaining()));
+            let wanted = (chunk.len() as u64)
+                .min(left)
+                .min(self.progress.update(id, |s| s.remaining()));
             for limiter in &self.options.limiters {
-                if let Err(error) = cancellable(&self.stop, async {
+                cancellable(&self.stop, async {
                     limiter.acquire(wanted).await;
                     Ok(())
                 })
-                .await
-                {
-                    writer.flush().await?;
-                    return Err(error);
-                }
+                .await?;
             }
             let (take, done) = self.progress.update(id, |s| {
-                let take = chunk.len().min(s.remaining() as usize);
+                let take = (chunk.len() as u64).min(left).min(s.remaining()) as usize;
                 s.downloaded += take as u64;
                 let done = s.remaining() == 0;
                 if done {
@@ -306,12 +339,14 @@ impl Worker {
                 (take, done)
             });
             writer.write_all(&chunk[..take]).await?;
+            left -= take as u64;
             if done {
-                writer.flush().await?;
-                return Ok(());
+                return Ok(true);
             }
         }
-        writer.flush().await?;
+        if left == 0 {
+            return Ok(false);
+        }
         let (received, expected) = self.progress.update(id, |s| (s.downloaded, s.len()));
         Err(Error::Incomplete { received, expected })
     }

@@ -7,11 +7,13 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{ArgGroup, Parser};
 use tokio::sync::broadcast::error::RecvError;
 use velo_core::{DownloadState, EngineEvent, QueueId, format};
 use velo_engine::{Engine, EngineConfig, NewDownload, RequestOptions, RetryPolicy};
+use velo_extract::Extractor;
 use velo_ipc::{Endpoint, Message};
 use velo_store::Store;
 
@@ -30,6 +32,12 @@ pub enum Error {
     /// The app refused the request, or the socket failed.
     #[error(transparent)]
     Ipc(#[from] velo_ipc::Error),
+    /// YouTube didn't give the video's streams.
+    #[error(transparent)]
+    YouTube(#[from] velo_extract::Error),
+    /// The asked-for format isn't offered.
+    #[error("YouTube doesn't offer that format; it offers: {0}")]
+    NoFormat(String),
     /// The engine couldn't start.
     #[error(transparent)]
     Engine(#[from] velo_engine::Error),
@@ -68,6 +76,10 @@ pub struct Cli {
     /// Add to the main queue without starting it.
     #[arg(short, long, requires = "download")]
     pub add_only: bool,
+    /// For a YouTube address: the format (itag) to download; the best video with sound if not
+    /// given.
+    #[arg(long, value_name = "ITAG", requires = "download")]
+    pub itag: Option<u32>,
     /// Start the main queue.
     #[arg(short, long)]
     pub start_queue: bool,
@@ -138,6 +150,7 @@ fn forward(cli: &Cli, endpoint: &Endpoint) -> Result<()> {
                 file_name: cli.file.clone(),
                 start: !cli.add_only,
                 silent: cli.no_questions,
+                itag: cli.itag,
             },
         )?;
     }
@@ -151,6 +164,11 @@ fn forward(cli: &Cli, endpoint: &Endpoint) -> Result<()> {
 async fn headless(cli: &Cli, places: &Places) -> Result<()> {
     let settings = velo_store::load_settings(&places.settings)?;
     let mut store = Store::open(&places.database)?;
+    let extractor = Extractor::new(velo_engine::client_with(
+        &settings,
+        &RequestOptions::default(),
+    )?)
+    .with_cache_dir(places.data.join("player-cache"));
     let engine = Engine::start(
         EngineConfig {
             temp_dir: settings
@@ -159,6 +177,7 @@ async fn headless(cli: &Cli, places: &Places) -> Result<()> {
                 .unwrap_or_else(|| places.parts.clone()),
             settings: settings.clone(),
             retry: RetryPolicy::default(),
+            resolver: Some(Arc::new(extractor.clone())),
         },
         store.load_downloads()?,
         store.load_queues()?,
@@ -169,10 +188,20 @@ async fn headless(cli: &Cli, places: &Places) -> Result<()> {
 
     let mut waiting = None;
     if let Some(url) = &cli.download {
+        let video = match velo_extract::video_id(url) {
+            Some(_) => Some(choose_format(&extractor, url, cli.itag).await?),
+            None => None,
+        };
+        let file_name = match &video {
+            Some((video, format)) => {
+                Some(cli.file.clone().unwrap_or_else(|| video.file_name(format)))
+            }
+            None => cli.file.clone(),
+        };
         let (save_dir, category) = match &cli.path {
             Some(dir) => (std::path::absolute(dir)?, None),
             None => {
-                let name = match &cli.file {
+                let name = match &file_name {
                     Some(name) => name.clone(),
                     None => server_name(&settings, url).await,
                 };
@@ -182,14 +211,26 @@ async fn headless(cli: &Cli, places: &Places) -> Result<()> {
                 (dir, category)
             }
         };
+        let (address, description, source) = match &video {
+            Some((video, format)) => (
+                format.url.clone().unwrap_or_default(),
+                video.title.clone(),
+                Some(velo_core::Source::YouTube {
+                    video_id: video.id.clone(),
+                    itags: vec![format.itag],
+                }),
+            ),
+            None => (url.clone(), String::new(), None),
+        };
         let id = engine.add(NewDownload {
-            url: url.clone(),
-            file_name: cli.file.clone().unwrap_or_default(),
+            url: address,
+            file_name: file_name.unwrap_or_default(),
             save_dir,
             category,
-            description: String::new(),
+            description,
             start: !cli.add_only,
             request: RequestOptions::default(),
+            source,
         });
         if cli.add_only {
             engine.enqueue(QueueId::MAIN, vec![id]);
@@ -259,6 +300,26 @@ async fn headless(cli: &Cli, places: &Places) -> Result<()> {
         save(&mut store, &event);
     }
     outcome
+}
+
+/// The video at YouTube address `url` and its format `itag`, or the best video with sound.
+async fn choose_format(
+    extractor: &Extractor,
+    url: &str,
+    itag: Option<u32>,
+) -> Result<(velo_extract::Video, velo_extract::Format)> {
+    let video = extractor.video_at(url).await?;
+    let format = match itag {
+        Some(itag) => video.format(itag),
+        None => video.choices().first().copied(),
+    }
+    .filter(|f| f.url.is_some())
+    .cloned()
+    .ok_or_else(|| {
+        let offered: Vec<String> = video.choices().iter().map(|f| f.itag.to_string()).collect();
+        Error::NoFormat(offered.join(", "))
+    })?;
+    Ok((video, format))
 }
 
 /// The file name the server gives `url`, or an empty name if it can't be asked; the engine
