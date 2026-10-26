@@ -1,4 +1,19 @@
 //! Domain types shared by every Velo crate: downloads, segments, categories, queues and settings.
+//!
+//! This crate does no I/O. Types derive `serde` traits so that `velo-store` can persist them and
+//! `velo-ipc` can send them.
+
+mod category;
+mod download;
+mod queue;
+mod segment;
+mod settings;
+
+pub use category::Category;
+pub use download::{Download, DownloadId, DownloadState};
+pub use queue::{Queue, QueueId};
+pub use segment::{Segment, SegmentId, SegmentState};
+pub use settings::Settings;
 
 /// Errors from Velo's domain layer.
 #[derive(Debug, thiserror::Error)]
