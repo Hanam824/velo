@@ -132,6 +132,16 @@ impl Bridge {
         &self.engine
     }
 
+    /// The extractor that asks YouTube about videos, usable from any thread.
+    pub fn extractor(&self) -> &Extractor {
+        &self.extractor
+    }
+
+    /// The runtime the engine runs on, for waiting on async work from other threads.
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.runtime
+    }
+
     /// Every event that has arrived since the last call, without waiting.
     pub fn drain(&self) -> Vec<EngineEvent> {
         self.events.try_iter().collect()

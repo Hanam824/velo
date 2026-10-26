@@ -76,22 +76,26 @@ async function handOff(url: string, referer?: string, fileName?: string): Promis
 /** Downloads Velo gave back to the browser, which mustn't be captured again. */
 const returned = new Set<string>();
 
-ext.downloads.onCreated.addListener(async (item) => {
-  const url = item.finalUrl || item.url;
-  if (returned.delete(url) || item.byExtensionId === ext.runtime.id) return;
-  const current = await refresh();
-  const bypass = Date.now() < current.bypassUntil;
-  if (!current.enabled || !shouldCapture({ url, filename: item.filename }, current.extensions, bypass)) {
-    return;
-  }
-  await ext.downloads.cancel(item.id).catch(() => undefined);
-  await ext.downloads.erase({ id: item.id }).catch(() => undefined);
-  if (!(await handOff(url, item.referrer || undefined, baseName(item.filename)))) {
-    // Velo couldn't take it: let the browser download it after all.
-    returned.add(url);
-    await ext.downloads.download({ url });
-  }
-});
+// Safari has no downloads API, so there its extension only offers the menu and the YouTube
+// button.
+if (ext.downloads !== undefined) {
+  ext.downloads.onCreated.addListener(async (item) => {
+    const url = item.finalUrl || item.url;
+    if (returned.delete(url) || item.byExtensionId === ext.runtime.id) return;
+    const current = await refresh();
+    const bypass = Date.now() < current.bypassUntil;
+    if (!current.enabled || !shouldCapture({ url, filename: item.filename }, current.extensions, bypass)) {
+      return;
+    }
+    await ext.downloads.cancel(item.id).catch(() => undefined);
+    await ext.downloads.erase({ id: item.id }).catch(() => undefined);
+    if (!(await handOff(url, item.referrer || undefined, baseName(item.filename)))) {
+      // Velo couldn't take it: let the browser download it after all.
+      returned.add(url);
+      await ext.downloads.download({ url });
+    }
+  });
+}
 
 ext.runtime.onInstalled.addListener(() => {
   ext.contextMenus.create({
