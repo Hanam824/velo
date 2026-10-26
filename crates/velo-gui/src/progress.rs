@@ -1,7 +1,7 @@
 //! Progress dialogs: one window per download, showing its status, segments and connections.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, VecModel};
@@ -11,9 +11,35 @@ use crate::app::Commands;
 use crate::list::DownloadTable;
 use crate::{ConnectionRow, ProgressWindow, SegmentView, format};
 
-/// The open progress dialogs.
+/// What a download's progress dialog lets the user choose besides pausing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadOptions {
+    /// The download's own speed limit in KB/s, if on.
+    pub limit_kb: Option<u32>,
+    /// Show Download complete when it finishes.
+    pub show_complete: bool,
+    /// Quit Velo when it finishes.
+    pub exit: bool,
+    /// Turn the computer off when it finishes.
+    pub shutdown: bool,
+}
+
+impl Default for DownloadOptions {
+    fn default() -> Self {
+        Self {
+            limit_kb: None,
+            show_complete: true,
+            exit: false,
+            shutdown: false,
+        }
+    }
+}
+
+/// The open progress dialogs, and the options chosen in them for this session.
 pub struct ProgressDialogs {
     commands: Rc<dyn Commands>,
+    /// Options per download; downloads not here use the defaults.
+    options: RefCell<HashMap<DownloadId, DownloadOptions>>,
     /// Each open dialog, and whether its download has been in the table yet: a dialog opened
     /// before the engine reports its download must not close as "deleted".
     windows: RefCell<BTreeMap<DownloadId, (ProgressWindow, Cell<bool>)>>,
@@ -24,6 +50,7 @@ impl ProgressDialogs {
     pub fn new(commands: Rc<dyn Commands>) -> Rc<Self> {
         Rc::new(Self {
             commands,
+            options: RefCell::default(),
             windows: RefCell::default(),
         })
     }
@@ -38,6 +65,37 @@ impl ProgressDialogs {
             return window.show();
         }
         let window = ProgressWindow::new()?;
+        let options = self.options_for(id);
+        window.set_limit_enabled(options.limit_kb.is_some());
+        if let Some(kb) = options.limit_kb {
+            window.set_limit_kb(kb as i32);
+        }
+        window.set_show_complete(options.show_complete);
+        window.set_exit_when_done(options.exit);
+        window.set_shutdown_when_done(options.shutdown);
+        let (this, weak) = (Rc::downgrade(self), window.as_weak());
+        window.on_limit_changed(move || {
+            let (Some(this), Some(window)) = (this.upgrade(), weak.upgrade()) else {
+                return;
+            };
+            let kb = window
+                .get_limit_enabled()
+                .then(|| window.get_limit_kb().max(1) as u32);
+            this.options.borrow_mut().entry(id).or_default().limit_kb = kb;
+            this.commands
+                .set_speed_limit(id, kb.map(|kb| u64::from(kb) * 1024));
+        });
+        let (this, weak) = (Rc::downgrade(self), window.as_weak());
+        window.on_completion_changed(move || {
+            let (Some(this), Some(window)) = (this.upgrade(), weak.upgrade()) else {
+                return;
+            };
+            let mut options = this.options.borrow_mut();
+            let entry = options.entry(id).or_default();
+            entry.show_complete = window.get_show_complete();
+            entry.exit = window.get_exit_when_done();
+            entry.shutdown = window.get_shutdown_when_done();
+        });
         let commands = self.commands.clone();
         window.on_pause(move || commands.pause(id));
         let commands = self.commands.clone();
@@ -83,8 +141,13 @@ impl ProgressDialogs {
         }
     }
 
+    /// The options chosen for download `id`, or the defaults.
+    pub fn options_for(&self, id: DownloadId) -> DownloadOptions {
+        self.options.borrow().get(&id).cloned().unwrap_or_default()
+    }
+
     /// Hides and forgets download `id`'s dialog.
-    fn close(&self, id: DownloadId) {
+    pub fn close(&self, id: DownloadId) {
         if let Some((window, _)) = self.windows.borrow_mut().remove(&id) {
             let _ = window.hide();
         }
@@ -280,6 +343,35 @@ mod tests {
         let connections = window.get_connections();
         assert_eq!(connections.row_data(0).unwrap().info, "Receiving data…");
         assert_eq!(connections.row_data(1).unwrap().info, "Connecting…");
+    }
+
+    #[test]
+    fn the_speed_limiter_and_completion_options_are_kept_per_download() {
+        let (dialogs, recorder) = dialogs();
+        let (download, _) = running();
+        let mut table = DownloadTable::default();
+        table.upsert(download.clone());
+        dialogs.open(download.id, &table).unwrap();
+        let window = dialogs.window(download.id).unwrap();
+        window.set_limit_enabled(true);
+        window.set_limit_kb(250);
+        window.invoke_limit_changed();
+        window.set_exit_when_done(true);
+        window.invoke_completion_changed();
+        assert_eq!(*recorder.0.borrow(), ["limit 7 256000"]);
+        let options = dialogs.options_for(download.id);
+        assert_eq!(options.limit_kb, Some(250));
+        assert!(options.exit && options.show_complete && !options.shutdown);
+
+        // Reopening shows the same choices.
+        dialogs.close(download.id);
+        dialogs.open(download.id, &table).unwrap();
+        let window = dialogs.window(download.id).unwrap();
+        assert!(window.get_limit_enabled() && window.get_exit_when_done());
+        assert_eq!(window.get_limit_kb(), 250);
+        window.set_limit_enabled(false);
+        window.invoke_limit_changed();
+        assert_eq!(recorder.0.borrow().last().unwrap(), "limit 7 none");
     }
 
     #[test]

@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 etcetera.workspace = true
+opener.workspace = true
 rfd.workspace = true
 thiserror.workspace = true
 

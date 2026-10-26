@@ -23,6 +23,8 @@ base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 etcetera = "0.11"
 futures-util = { version = "0.3", default-features = false }
+# Opens files with their default app and shows them in the file manager (D-Bus through zbus on Linux).
+opener = { version = "0.9", features = ["reveal"] }
 percent-encoding = "2"
 proptest = "1"
 # Native file dialogs; on Linux through the XDG desktop portal, so no GTK is needed.

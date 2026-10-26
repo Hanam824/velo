@@ -63,6 +63,9 @@ export component AppWindow inherits Window {
     callback resume-download(id: int);
     callback stop-download(id: int);
     callback delete-download(id: int);
+    callback open-file(id: int);
+    callback open-folder(id: int);
+    callback properties(id: int);
     // The user confirmed deleting download `id`, and its finished file too if `delete-file`.
     callback delete-confirmed(id: int, delete-file: bool);
     callback appearance-changed(appearance: Appearance);
@@ -274,6 +277,9 @@ export component AppWindow inherits Window {
                 resume(id) => { root.resume-download(id); }
                 stop(id) => { root.stop-download(id); }
                 delete(id) => { root.delete-download(id); }
+                open-file(id) => { root.open-file(id); }
+                open-folder(id) => { root.open-folder(id); }
+                properties(id) => { root.properties(id); }
             }
         }
 

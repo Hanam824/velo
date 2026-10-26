@@ -16,7 +16,7 @@ mod probe;
 mod segmented;
 
 pub use download::download_file;
-pub use engine::{Engine, EngineConfig, NewDownload, RetryPolicy};
+pub use engine::{DownloadEdit, Engine, EngineConfig, NewDownload, RetryPolicy};
 pub use fetch::fetch_range;
 pub use filename::{file_name, sanitize_file_name, unique_file_name};
 pub use limiter::Limiter;

@@ -79,6 +79,18 @@ pub struct NewDownload {
     pub request: RequestOptions,
 }
 
+/// Changes to a download's details, from its Properties.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DownloadEdit {
+    /// A new file name; made safe for every platform. Only while not running or complete.
+    pub file_name: Option<String>,
+    /// A new address for the same file, such as a mirror. Only while not running or complete;
+    /// if the file there differs, the next resume starts over.
+    pub url: Option<String>,
+    /// A new description; any time.
+    pub description: Option<String>,
+}
+
 /// A handle to the engine task. Cloning it gives another handle to the same engine.
 ///
 /// Every method returns at once; results arrive as [`EngineEvent`]s from
@@ -185,6 +197,11 @@ impl Engine {
         self.send(Command::SetSpeedLimit(id, rate));
     }
 
+    /// Changes download `id`'s details; see [`DownloadEdit`] for what applies when.
+    pub fn edit(&self, id: DownloadId, edit: DownloadEdit) {
+        self.send(Command::Edit(id, edit));
+    }
+
     /// Sends [`EngineEvent::Changed`] for every download.
     pub fn resync(&self) {
         self.send(Command::Resync);
@@ -214,6 +231,7 @@ enum Command {
     Delete { id: DownloadId, delete_file: bool },
     SetSettings(Box<Settings>),
     SetSpeedLimit(DownloadId, Option<u64>),
+    Edit(DownloadId, DownloadEdit),
     Resync,
     Shutdown(oneshot::Sender<()>),
 }
@@ -352,6 +370,7 @@ impl Actor {
             }
             Command::SetSettings(settings) => self.set_settings(*settings),
             Command::SetSpeedLimit(id, rate) => self.limiter(id).set_rate(rate),
+            Command::Edit(id, edit) => self.edit(id, edit),
             Command::Resync => {
                 let all: Vec<_> = self
                     .downloads
@@ -523,6 +542,32 @@ impl Actor {
         }
         self.global.set_rate(settings.speed_limit);
         self.config.settings = settings;
+    }
+
+    /// Applies `edit` to download `id` as far as its state allows, and reports the change.
+    fn edit(&mut self, id: DownloadId, edit: DownloadEdit) {
+        let Some(entry) = self.downloads.get_mut(&id) else {
+            return;
+        };
+        let download = &mut entry.download;
+        let settled = entry.running.is_none() && download.state != DownloadState::Complete;
+        if let Some(description) = edit.description {
+            download.description = description;
+        }
+        if settled {
+            if let Some(name) = edit
+                .file_name
+                .as_deref()
+                .and_then(crate::sanitize_file_name)
+            {
+                download.file_name = name;
+            }
+            if let Some(url) = edit.url.filter(|u| reqwest::Url::parse(u).is_ok()) {
+                download.url = url;
+            }
+        }
+        let snapshot = download.clone();
+        self.emit(EngineEvent::Changed(snapshot));
     }
 
     /// Download `id`'s own speed limit, created without a limit if it has none yet.
