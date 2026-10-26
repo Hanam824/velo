@@ -17,6 +17,8 @@ velo-ipc = { path = "crates/velo-ipc" }
 velo-platform = { path = "crates/velo-platform" }
 velo-store = { path = "crates/velo-store" }
 
+proptest = "1"
+serde = { version = "1", features = ["derive"] }
 slint = "1.18"
 slint-build = "1.18"
 thiserror = "2"
