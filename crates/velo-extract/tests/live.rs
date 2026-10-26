@@ -47,5 +47,9 @@ async fn a_real_video_has_streams() {
         .await
         .unwrap();
     eprintln!("{}: {}", best.label(), response.status());
-    assert_eq!(response.status().as_u16(), 206, "the stream should be served");
+    assert_eq!(
+        response.status().as_u16(),
+        206,
+        "the stream should be served"
+    );
 }
