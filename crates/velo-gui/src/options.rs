@@ -204,6 +204,7 @@ fn fill(window: &OptionsWindow, settings: &Settings, downloads: &Path, temp: &Pa
 
     window.set_show_progress(settings.show_progress_dialog);
     window.set_show_complete(settings.show_complete_dialog);
+    window.set_close_to_tray(settings.close_to_tray);
     window.set_user_agent(settings.user_agent.clone().unwrap_or_default().into());
     window.set_default_user_agent(concat!("Velo/", env!("CARGO_PKG_VERSION")).into());
 
@@ -259,6 +260,7 @@ fn collect(window: &OptionsWindow, mut settings: Settings) -> Settings {
     }
     settings.show_progress_dialog = window.get_show_progress();
     settings.show_complete_dialog = window.get_show_complete();
+    settings.close_to_tray = window.get_close_to_tray();
     settings.user_agent =
         Some(window.get_user_agent().trim().to_string()).filter(|s| !s.is_empty());
     settings.max_connections = connections_at(window.get_connections_index());
@@ -367,6 +369,8 @@ mod tests {
         window.set_proxy_url("socks5://127.0.0.1:1080".into());
         window.set_appearance(2);
         window.set_user_agent("Mozilla/5.0".into());
+        assert!(window.get_close_to_tray());
+        window.set_close_to_tray(false);
         window.invoke_accepted();
         assert!(dialog.window().is_none());
 
@@ -390,6 +394,7 @@ mod tests {
         );
         assert_eq!(settings.proxy.mode, ProxyMode::Manual);
         assert_eq!(settings.user_agent.as_deref(), Some("Mozilla/5.0"));
+        assert!(!settings.close_to_tray);
         assert_eq!(*saved.borrow(), Some(velo_core::Appearance::Dark));
         assert_eq!(*recorder.0.borrow(), ["settings 16"]);
     }

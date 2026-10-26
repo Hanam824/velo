@@ -25,6 +25,8 @@ allow = [
     "Unicode-3.0",
     "CC0-1.0",
     "Unlicense",
+    # Public-domain-equivalent, like CC0 and Unlicense (used by interprocess's helpers).
+    "0BSD",
     "LicenseRef-Slint-Royalty-free-2.0",
 ]
 confidence-threshold = 0.9

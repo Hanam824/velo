@@ -40,6 +40,8 @@ pub struct Settings {
     pub show_complete_dialog: bool,
     /// Light, dark, or as the operating system is set.
     pub appearance: Appearance,
+    /// Whether closing the main window keeps Velo running in the tray.
+    pub close_to_tray: bool,
 }
 
 /// The colour scheme of Velo's windows.
@@ -168,6 +170,7 @@ impl Default for Settings {
             show_progress_dialog: true,
             show_complete_dialog: true,
             appearance: Appearance::System,
+            close_to_tray: true,
         }
     }
 }
