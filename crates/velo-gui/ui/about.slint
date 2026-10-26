@@ -1,0 +1,52 @@
+import { AboutSlint, Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// The About dialog's content. Slint's royalty-free license requires the AboutSlint attribution.
+export component AboutPanel inherits Rectangle {
+    in property <string> version;
+    callback close();
+    background: Theme.window;
+    border-color: Theme.border;
+    border-width: 1px;
+    border-radius: 8px;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: #00000040;
+
+    VerticalBox {
+        alignment: start;
+        HorizontalBox {
+            Image {
+                source: @image-url("../../../assets/icons/velo.svg");
+                width: 48px;
+                height: 48px;
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "Velo Download Manager";
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: Theme.text;
+                }
+                Text {
+                    text: "Version " + root.version;
+                    color: Theme.text-muted;
+                }
+            }
+        }
+        Text {
+            text: "MIT license. Icons by Lucide (ISC).";
+            color: Theme.text-muted;
+        }
+        AboutSlint {
+            height: 120px;
+        }
+        HorizontalLayout {
+            alignment: end;
+            Button {
+                text: "Close";
+                clicked => { root.close(); }
+            }
+        }
+    }
+}

@@ -19,6 +19,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo run -p velo-gui                     # the desktop app (`velo` binary)
 cargo run -p velo-cli -- <args>           # the `velo-cli` binary
+VELO_SNAPSHOT_DIR=/tmp/velo cargo test -p velo-gui snapshot -- --ignored  # PNGs of the windows, no display needed
 ```
 
 The first build of `velo-gui` compiles Slint and takes a few minutes. On Linux it needs `libfontconfig1-dev` and `libxkbcommon-dev`.

@@ -1,0 +1,122 @@
+// The Categories pane on the left of the main window: All Downloads, Unfinished and Finished,
+// each with the categories under it, then the queues. Rust builds the rows.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Which icon a row of the Categories tree shows.
+export enum CategoryIcon { all, unfinished, finished, folder, queues, queue }
+
+// One row of the Categories tree.
+export struct CategoryItem {
+    // Text shown for the row.
+    label: string,
+    // Icon shown before the label.
+    icon: CategoryIcon,
+    // Indentation level: 0 for the top-level groups.
+    depth: int,
+    // Identifies the row, such as "all", "unfinished/Video" or "queue/0".
+    key: string,
+    // Whether the row has children, so it shows an expand/collapse chevron.
+    has-children: bool,
+    // Whether its children are shown.
+    expanded: bool,
+}
+
+export component CategoriesPane inherits Rectangle {
+    in property <[CategoryItem]> items;
+    // Key of the selected row.
+    in-out property <string> selected: "all";
+    callback selected-changed(key: string);
+    // The chevron of the row with `key` was clicked.
+    callback toggle-expanded(key: string);
+
+    background: Theme.window;
+
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.border;
+    }
+
+    // The icon image for a Categories row.
+    function category-icon(icon: CategoryIcon) -> image {
+        if icon == CategoryIcon.all {
+            return @image-url("../../../assets/icons/lucide/download.svg");
+        }
+        if icon == CategoryIcon.unfinished {
+            return @image-url("../../../assets/icons/lucide/hourglass.svg");
+        }
+        if icon == CategoryIcon.finished {
+            return @image-url("../../../assets/icons/lucide/circle-check.svg");
+        }
+        if icon == CategoryIcon.queues {
+            return @image-url("../../../assets/icons/lucide/list-ordered.svg");
+        }
+        if icon == CategoryIcon.queue {
+            return @image-url("../../../assets/icons/lucide/list-start.svg");
+        }
+        @image-url("../../../assets/icons/lucide/folder.svg")
+    }
+
+    VerticalLayout {
+        Rectangle {
+            height: 26px;
+            background: Theme.panel;
+            Text {
+                x: 8px;
+                text: "Categories";
+                font-weight: 600;
+                vertical-alignment: center;
+                color: Theme.text;
+            }
+        }
+        ListView {
+            for item in root.items: Rectangle {
+                height: 24px;
+                background: item.key == root.selected ? Theme.selection
+                    : touch.has-hover ? Theme.hover : transparent;
+                accessible-role: list-item;
+                accessible-label: item.label;
+                accessible-item-selected: item.key == root.selected;
+
+                touch := TouchArea {
+                    clicked => {
+                        root.selected = item.key;
+                        root.selected-changed(item.key);
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 4px + item.depth * 16px;
+                    padding-right: 8px;
+                    spacing: 4px;
+                    Rectangle {
+                        width: 16px;
+                        if item.has-children: Image {
+                            source: item.expanded
+                                ? @image-url("../../../assets/icons/lucide/chevron-down.svg")
+                                : @image-url("../../../assets/icons/lucide/chevron-right.svg");
+                            colorize: Theme.text-muted;
+                            width: 14px;
+                            height: 14px;
+                            TouchArea {
+                                clicked => { root.toggle-expanded(item.key); }
+                            }
+                        }
+                    }
+                    Image {
+                        source: category-icon(item.icon);
+                        colorize: Theme.icon;
+                        width: 16px;
+                    }
+                    Text {
+                        text: item.label;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        color: Theme.text;
+                    }
+                }
+            }
+        }
+    }
+}

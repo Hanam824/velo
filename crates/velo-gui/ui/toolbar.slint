@@ -1,0 +1,114 @@
+// The main window's toolbar: large icons with their labels underneath, as in the IDM layout.
+// Rust decides which buttons are enabled from the selected download.
+
+import { Theme } from "theme.slint";
+
+// One toolbar button.
+export component ToolButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: max(64px, caption.preferred-width + 16px);
+    height: 58px;
+    border-radius: 4px;
+    background: !root.enabled ? transparent
+        : touch.pressed ? Theme.pressed
+        : touch.has-hover ? Theme.hover : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    VerticalLayout {
+        padding: 4px;
+        spacing: 4px;
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: root.icon;
+                colorize: root.enabled ? Theme.icon : Theme.text-disabled;
+                width: 24px;
+                height: 24px;
+            }
+        }
+        caption := Text {
+            text: root.label;
+            font-size: 11px;
+            horizontal-alignment: center;
+            color: root.enabled ? Theme.text : Theme.text-disabled;
+        }
+    }
+}
+
+// The row of toolbar buttons under the menu bar.
+export component Toolbar inherits Rectangle {
+    in property <bool> can-resume;
+    in property <bool> can-stop;
+    in property <bool> can-stop-all;
+    in property <bool> can-delete;
+    in property <bool> can-delete-completed;
+    callback add-url();
+    callback resume();
+    callback stop();
+    callback stop-all();
+    callback delete();
+    callback delete-completed();
+
+    background: Theme.panel;
+    height: 66px;
+
+    HorizontalLayout {
+        padding: 4px;
+        spacing: 2px;
+        alignment: start;
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/plus.svg");
+            label: "Add URL";
+            clicked => { root.add-url(); }
+        }
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/play.svg");
+            label: "Resume";
+            enabled: root.can-resume;
+            clicked => { root.resume(); }
+        }
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/pause.svg");
+            label: "Stop";
+            enabled: root.can-stop;
+            clicked => { root.stop(); }
+        }
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/circle-stop.svg");
+            label: "Stop All";
+            enabled: root.can-stop-all;
+            clicked => { root.stop-all(); }
+        }
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/trash-2.svg");
+            label: "Delete";
+            enabled: root.can-delete;
+            clicked => { root.delete(); }
+        }
+        ToolButton {
+            icon: @image-url("../../../assets/icons/lucide/list-x.svg");
+            label: "Delete Completed";
+            enabled: root.can-delete-completed;
+            clicked => { root.delete-completed(); }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+}

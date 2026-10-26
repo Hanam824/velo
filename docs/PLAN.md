@@ -337,6 +337,7 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - Site Grabber wizard, download limits per hour, antivirus hook and synchronization queues.
 - Generic HLS/DASH sniffing on non-YouTube sites.
 - FTP, auto-update and localization.
+- Toolbar buttons Grabber (with the Site Grabber) and Share (needs a project page to share).
 
 ---
 

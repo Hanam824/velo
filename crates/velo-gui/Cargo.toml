@@ -21,6 +21,9 @@ slint.workspace = true
 [dev-dependencies]
 # Must match the slint version: runs the UI without a window system.
 i-slint-backend-testing = "=1.18.1"
+# For the snapshot test: the software renderer with system fonts draws windows into PNG files.
+png = "0.18"
+slint = { workspace = true, features = ["software-renderer-systemfonts"] }
 
 [build-dependencies]
 slint-build.workspace = true

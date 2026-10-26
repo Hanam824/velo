@@ -1,0 +1,209 @@
+// The main window: menu bar, toolbar, the Categories pane beside the download list, and the
+// status bar.
+
+import { AboutPanel } from "about.slint";
+import { CategoriesPane, CategoryItem } from "categories.slint";
+import { StatusBar } from "status-bar.slint";
+import { Appearance, Theme } from "theme.slint";
+import { Toolbar } from "toolbar.slint";
+
+// A vertical bar between two panes; dragging it moves `position`.
+component Splitter inherits Rectangle {
+    in-out property <length> position;
+    in property <length> minimum;
+    in property <length> maximum;
+
+    width: 5px;
+    background: touch.pressed || touch.has-hover ? Theme.border : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: col-resize;
+        moved => {
+            if (self.pressed) {
+                root.position = max(root.minimum, min(root.maximum,
+                    root.position + self.mouse-x - self.pressed-x));
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    in property <string> version;
+    in property <[CategoryItem]> categories;
+    in-out property <string> selected-category: "all";
+    in-out property <bool> show-categories: true;
+    in property <string> status-message: "Ready";
+    in property <string> status-summary;
+
+    // Toolbar and menu state, set from the selected download.
+    in property <bool> can-resume;
+    in property <bool> can-stop;
+    in property <bool> can-stop-all;
+    in property <bool> can-delete;
+    in property <bool> can-delete-completed;
+
+    callback add-url();
+    callback resume();
+    callback stop();
+    callback stop-all();
+    callback delete();
+    callback delete-completed();
+    callback category-selected(key: string);
+    callback category-toggled(key: string);
+    callback appearance-changed(appearance: Appearance);
+    callback quit();
+
+    private property <length> categories-width: 200px;
+
+    title: "Velo Download Manager";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 1000px;
+    preferred-height: 620px;
+    min-width: 640px;
+    min-height: 400px;
+    background: Theme.window;
+
+    MenuBar {
+        Menu {
+            title: "Tasks";
+            MenuItem {
+                title: "Add New Download…";
+                activated => { root.add-url(); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Exit";
+                activated => { root.quit(); }
+            }
+        }
+        Menu {
+            title: "Downloads";
+            MenuItem {
+                title: "Stop All";
+                enabled: root.can-stop-all;
+                activated => { root.stop-all(); }
+            }
+            MenuItem {
+                title: "Delete All Completed";
+                enabled: root.can-delete-completed;
+                activated => { root.delete-completed(); }
+            }
+        }
+        Menu {
+            title: "View";
+            MenuItem {
+                title: "Categories";
+                checkable: true;
+                checked: root.show-categories;
+                activated => { root.show-categories = !root.show-categories; }
+            }
+            Menu {
+                title: "Theme";
+                MenuItem {
+                    title: "System";
+                    checkable: true;
+                    checked: Theme.appearance == Appearance.system;
+                    activated => {
+                        Theme.apply(Appearance.system);
+                        root.appearance-changed(Appearance.system);
+                    }
+                }
+                MenuItem {
+                    title: "Light";
+                    checkable: true;
+                    checked: Theme.appearance == Appearance.light;
+                    activated => {
+                        Theme.apply(Appearance.light);
+                        root.appearance-changed(Appearance.light);
+                    }
+                }
+                MenuItem {
+                    title: "Dark";
+                    checkable: true;
+                    checked: Theme.appearance == Appearance.dark;
+                    activated => {
+                        Theme.apply(Appearance.dark);
+                        root.appearance-changed(Appearance.dark);
+                    }
+                }
+            }
+        }
+        Menu {
+            title: "Help";
+            MenuItem {
+                title: "About Velo";
+                activated => { about.show(); }
+            }
+        }
+    }
+
+    about := PopupWindow {
+        x: (root.width - 420px) / 2;
+        y: (root.height - 280px) / 2;
+        width: 420px;
+        height: 280px;
+        close-policy: close-on-click-outside;
+        AboutPanel {
+            version: root.version;
+            close => { about.close(); }
+        }
+    }
+
+    VerticalLayout {
+        Toolbar {
+            can-resume: root.can-resume;
+            can-stop: root.can-stop;
+            can-stop-all: root.can-stop-all;
+            can-delete: root.can-delete;
+            can-delete-completed: root.can-delete-completed;
+            add-url => { root.add-url(); }
+            resume => { root.resume(); }
+            stop => { root.stop(); }
+            stop-all => { root.stop-all(); }
+            delete => { root.delete(); }
+            delete-completed => { root.delete-completed(); }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            if root.show-categories: CategoriesPane {
+                width: root.categories-width;
+                items: root.categories;
+                selected: root.selected-category;
+                selected-changed(key) => {
+                    root.selected-category = key;
+                    root.category-selected(key);
+                }
+                toggle-expanded(key) => { root.category-toggled(key); }
+            }
+            if root.show-categories: Splitter {
+                position <=> root.categories-width;
+                minimum: 140px;
+                maximum: root.width / 2;
+            }
+
+            // Empty state until the download list arrives (Day 12).
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 8px;
+                Text {
+                    text: "No downloads yet";
+                    horizontal-alignment: center;
+                    font-size: 20px;
+                    color: Theme.text;
+                }
+                Text {
+                    text: "Use Add URL to download a file.";
+                    horizontal-alignment: center;
+                    color: Theme.text-muted;
+                }
+            }
+        }
+
+        StatusBar {
+            message: root.status-message;
+            summary: root.status-summary;
+        }
+    }
+}
