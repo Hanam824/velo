@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 velo-core.workspace = true
+velo-mux.workspace = true
 base64.workspace = true
 chrono.workspace = true
 percent-encoding.workspace = true
@@ -19,6 +20,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync",
 tokio-util.workspace = true
 
 [dev-dependencies]
+velo-mux = { workspace = true, features = ["testing"] }
 axum.workspace = true
 futures-util.workspace = true
 proptest.workspace = true

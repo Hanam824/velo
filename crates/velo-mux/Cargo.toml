@@ -1,0 +1,22 @@
+[package]
+name = "velo-mux"
+description = "Velo MP4 remuxing: joins a video stream and an audio stream into one file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[features]
+# Builders of small MP4 streams for tests (velo_mux::testing).
+testing = []
+
+[dev-dependencies]
+tempfile.workspace = true
+velo-mux = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true

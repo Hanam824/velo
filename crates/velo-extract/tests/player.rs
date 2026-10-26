@@ -99,12 +99,19 @@ async fn the_next_client_is_tried_when_one_is_refused() {
     assert_eq!(video.formats[1].height, Some(1080));
     assert_eq!(video.formats[2].content_length, Some(3_430_000));
 
-    let choices: Vec<u32> = video.choices().iter().map(|f| f.itag).collect();
-    assert_eq!(choices, [18, 140], "video with sound, then sound only");
+    let choices: Vec<Vec<u32>> = video.choices().iter().map(|c| c.itags()).collect();
     assert_eq!(
-        video.file_name(video.format(140).unwrap()),
-        "Velo test video.m4a"
+        choices,
+        [vec![137, 140], vec![18], vec![140]],
+        "1080p joined, 360p with sound, then sound only"
     );
+    let joined = video.choice(&[137, 140]).unwrap();
+    assert_eq!(joined.size(), Some(92_000_000 + 3_430_000));
+    assert_eq!(video.file_name(&joined), "Velo test video.mp4");
+    let sound = video.choice(&[140]).unwrap();
+    assert!(sound.is_audio_only());
+    assert_eq!(video.file_name(&sound), "Velo test video.m4a");
+    assert_eq!(video.choice(&[1, 2, 3]), None);
 
     let requests = requests.lock().unwrap();
     let names: Vec<&str> = requests.iter().map(|(name, _)| name.as_str()).collect();

@@ -651,3 +651,66 @@ async fn a_download_with_a_source_gets_a_fresh_address_before_it_starts() {
         failed.state
     );
 }
+
+/// Hands out the same addresses for every source.
+#[derive(Debug)]
+struct ListResolver(Vec<String>);
+
+impl Resolver for ListResolver {
+    fn resolve<'a>(&'a self, _source: &'a Source) -> Resolving<'a> {
+        let urls = self.0.clone();
+        Box::pin(async move { Ok(urls) })
+    }
+}
+
+#[tokio::test]
+async fn a_video_and_its_sound_are_downloaded_in_turn_and_joined() {
+    use velo_mux::testing::stream;
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    support::put_blob(
+        "video.mp4",
+        stream(1, 1000, 90_000, b"vide", &[0, 180_000], 0x10),
+    );
+    support::put_blob(
+        "audio.m4a",
+        stream(1, 44_100, 44_100, b"soun", &[0, 66_150, 132_300], 0x80),
+    );
+    let config = EngineConfig {
+        temp_dir: root.path().join("temp"),
+        settings: settings(),
+        retry: RetryPolicy {
+            max_retries: 1,
+            delay: Duration::from_millis(5),
+        },
+        resolver: Some(std::sync::Arc::new(ListResolver(vec![
+            format!("{base}/blob/video.mp4"),
+            format!("{base}/blob/audio.m4a"),
+        ]))),
+    };
+    let joining = Engine::start(config, Vec::new(), Vec::new()).unwrap();
+    let mut events = joining.subscribe();
+    let id = joining.add(NewDownload {
+        file_name: "clip.mp4".into(),
+        source: Some(Source::YouTube {
+            video_id: "dQw4w9WgXcQ".into(),
+            itags: vec![137, 140],
+        }),
+        ..new_download(root.path(), "https://expired.invalid/old".into(), true)
+    });
+    let done = wait_for_state(&mut events, id, |s| {
+        matches!(s, DownloadState::Complete | DownloadState::Failed(_))
+    })
+    .await;
+    let joined = fs::read(finished(&done)).unwrap();
+    assert_eq!(done.file_name, "clip.mp4");
+    assert_eq!(done.total_size, Some(joined.len() as u64));
+    assert_eq!(&joined[4..8], b"ftyp");
+    let traks = joined.windows(4).filter(|w| w == b"trak").count();
+    let moofs = joined.windows(4).filter(|w| w == b"moof").count();
+    assert_eq!((traks, moofs), (2, 5), "both tracks and all five fragments");
+    assert!(
+        !root.path().join("temp").join(id.0.to_string()).exists(),
+        "the streams and their parts are cleaned up"
+    );
+}

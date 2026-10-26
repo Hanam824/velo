@@ -193,8 +193,11 @@ async fn headless(cli: &Cli, places: &Places) -> Result<()> {
             None => None,
         };
         let file_name = match &video {
-            Some((video, format)) => {
-                Some(cli.file.clone().unwrap_or_else(|| video.file_name(format)))
+            Some((video, itags)) => {
+                let choice = video
+                    .choice(itags)
+                    .expect("the itags were chosen from the video");
+                Some(cli.file.clone().unwrap_or_else(|| video.file_name(&choice)))
             }
             None => cli.file.clone(),
         };
@@ -212,12 +215,15 @@ async fn headless(cli: &Cli, places: &Places) -> Result<()> {
             }
         };
         let (address, description, source) = match &video {
-            Some((video, format)) => (
-                format.url.clone().unwrap_or_default(),
+            Some((video, itags)) => (
+                video
+                    .format(itags[0])
+                    .and_then(|f| f.url.clone())
+                    .unwrap_or_default(),
                 video.title.clone(),
                 Some(velo_core::Source::YouTube {
                     video_id: video.id.clone(),
-                    itags: vec![format.itag],
+                    itags: itags.clone(),
                 }),
             ),
             None => (url.clone(), String::new(), None),
@@ -302,24 +308,23 @@ async fn headless(cli: &Cli, places: &Places) -> Result<()> {
     outcome
 }
 
-/// The video at YouTube address `url` and its format `itag`, or the best video with sound.
+/// The video at YouTube address `url` and the itags to download: format `itag`, or else the
+/// best choice (possibly a video and its sound, joined after downloading).
 async fn choose_format(
     extractor: &Extractor,
     url: &str,
     itag: Option<u32>,
-) -> Result<(velo_extract::Video, velo_extract::Format)> {
+) -> Result<(velo_extract::Video, Vec<u32>)> {
     let video = extractor.video_at(url).await?;
-    let format = match itag {
-        Some(itag) => video.format(itag),
-        None => video.choices().first().copied(),
+    let itags = match itag {
+        Some(itag) => video.choice(&[itag]).map(|c| c.itags()),
+        None => video.choices().first().map(|c| c.itags()),
     }
-    .filter(|f| f.url.is_some())
-    .cloned()
     .ok_or_else(|| {
-        let offered: Vec<String> = video.choices().iter().map(|f| f.itag.to_string()).collect();
+        let offered: Vec<String> = video.formats.iter().map(|f| f.itag.to_string()).collect();
         Error::NoFormat(offered.join(", "))
     })?;
-    Ok((video, format))
+    Ok((video, itags))
 }
 
 /// The file name the server gives `url`, or an empty name if it can't be asked; the engine
