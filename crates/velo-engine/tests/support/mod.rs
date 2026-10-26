@@ -15,6 +15,10 @@
 //! - `/versioned/{name}`: like `/slower`, with [`versioned_body`] and `ETag` `"v<n>"` for the
 //!   current version `n`, which starts at 0.
 //! - `/bump`: moves `/versioned` to the next version.
+//! - `/choppy/{name}`: like `/slow`, but every `GET` stops after 64 KiB of its range.
+//! - `/flakyslow/{name}`: like `/flaky`, at the `/slower` pace, so it can be paused.
+//! - `/big/{name}`: [`big_body`] with ranges, sent at 16 KiB every 5 ms per connection (about
+//!   3 MB/s each), for the benchmark.
 //! - `/auth/{name}`: like `/files`, but only with Basic authorization for [`USER`] and
 //!   [`PASSWORD`]; `401` otherwise.
 //! - `/headers/{name}`: like `/files`, but only with `Referer` [`REFERER`] and `Cookie`
@@ -65,6 +69,19 @@ pub fn body() -> Vec<u8> {
         .collect()
 }
 
+/// Size of `/big`.
+pub const BIG_SIZE: usize = 8 * 1024 * 1024;
+
+/// The bytes of `/big`: the [`body`] pattern over [`BIG_SIZE`] bytes, built once.
+pub fn big_body() -> &'static [u8] {
+    static BODY: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| {
+        (0..BIG_SIZE as u64)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect()
+    })
+}
+
 /// The bytes of version `n` of `/versioned`: [`body`] with every byte XORed with `n`.
 pub fn versioned_body(n: u8) -> Vec<u8> {
     body().into_iter().map(|b| b ^ n).collect()
@@ -80,9 +97,24 @@ const SLOW: Pace = Pace(8 * 1024, Duration::from_millis(2));
 /// 2 KiB every 10 ms.
 const SLOWER: Pace = Pace(2 * 1024, Duration::from_millis(10));
 
+/// 16 KiB every 5 ms.
+const THROTTLED: Pace = Pace(16 * 1024, Duration::from_millis(5));
+
+/// Where [`trickle`] cuts the connection.
+#[derive(Clone, Copy)]
+enum Cut {
+    /// Sends everything.
+    Never,
+    /// Fails halfway through.
+    Half,
+    /// Fails after this many bytes.
+    After(usize),
+}
+
 /// Starts the server on a free local port and returns its base URL, e.g. `http://127.0.0.1:1234`.
 pub async fn start() -> String {
     let gets = Arc::new(AtomicUsize::new(0));
+    let slow_gets = Arc::new(AtomicUsize::new(0));
     let version = Arc::new(AtomicUsize::new(0));
     let bump = Arc::clone(&version);
     let app = Router::new()
@@ -142,7 +174,12 @@ pub async fn start() -> String {
         .route(
             "/slow/{name}",
             get(|method: Method, headers: HeaderMap| async move {
-                trickle(serve(&method, &headers, &body(), true, &[]), false, SLOW).await
+                trickle(
+                    serve(&method, &headers, &body(), true, &[]),
+                    Cut::Never,
+                    SLOW,
+                )
+                .await
             }),
         )
         .route(
@@ -153,14 +190,19 @@ pub async fn start() -> String {
                     let response = serve(&method, &headers, &body(), true, &[]);
                     let cut = method == Method::GET
                         && gets.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
-                    trickle(response, cut, SLOW).await
+                    trickle(response, if cut { Cut::Half } else { Cut::Never }, SLOW).await
                 }
             }),
         )
         .route(
             "/slower/{name}",
             get(|method: Method, headers: HeaderMap| async move {
-                trickle(serve(&method, &headers, &body(), true, &[]), false, SLOWER).await
+                trickle(
+                    serve(&method, &headers, &body(), true, &[]),
+                    Cut::Never,
+                    SLOWER,
+                )
+                .await
             }),
         )
         .route(
@@ -171,7 +213,7 @@ pub async fn start() -> String {
                     let mut response = serve(&method, &headers, &versioned_body(n), true, &[]);
                     let etag = format!("\"v{n}\"").parse().unwrap();
                     response.headers_mut().insert(ETAG, etag);
-                    trickle(response, false, SLOWER).await
+                    trickle(response, Cut::Never, SLOWER).await
                 }
             }),
         )
@@ -208,6 +250,41 @@ pub async fn start() -> String {
             }),
         )
         .route(
+            "/choppy/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                let response = serve(&method, &headers, &body(), true, &[]);
+                let cut = if method == Method::GET {
+                    Cut::After(64 * 1024)
+                } else {
+                    Cut::Never
+                };
+                trickle(response, cut, SLOW).await
+            }),
+        )
+        .route(
+            "/flakyslow/{name}",
+            get(move |method: Method, headers: HeaderMap| {
+                let gets = Arc::clone(&slow_gets);
+                async move {
+                    let response = serve(&method, &headers, &body(), true, &[]);
+                    let cut = method == Method::GET
+                        && gets.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
+                    trickle(response, if cut { Cut::Half } else { Cut::Never }, SLOWER).await
+                }
+            }),
+        )
+        .route(
+            "/big/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                trickle(
+                    serve(&method, &headers, big_body(), true, &[]),
+                    Cut::Never,
+                    THROTTLED,
+                )
+                .await
+            }),
+        )
+        .route(
             "/fail/{name}",
             get(|method: Method, headers: HeaderMap| async move {
                 if method == Method::GET {
@@ -222,12 +299,17 @@ pub async fn start() -> String {
     format!("http://{address}")
 }
 
-/// Re-sends `response`'s body at `pace`; with `cut`, the connection fails halfway through.
-async fn trickle(response: Response<Body>, cut: bool, pace: Pace) -> Response<Body> {
+/// Re-sends `response`'s body at `pace`, failing the connection where `cut` says.
+async fn trickle(response: Response<Body>, cut: Cut, pace: Pace) -> Response<Body> {
     let Pace(chunk, delay) = pace;
     let (parts, body) = response.into_parts();
     let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-    let stop = if cut { bytes.len() / 2 } else { bytes.len() };
+    let stop = match cut {
+        Cut::Never => bytes.len(),
+        Cut::Half => bytes.len() / 2,
+        Cut::After(n) => bytes.len().min(n),
+    };
+    let cut = stop < bytes.len();
     let chunks = futures_util::stream::unfold(0, move |sent| {
         let bytes = bytes.clone();
         async move {
