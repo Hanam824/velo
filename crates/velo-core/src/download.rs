@@ -60,6 +60,9 @@ pub struct Download {
     pub added_at: Option<i64>,
     /// When the download was last started, in seconds since the Unix epoch.
     pub last_try_at: Option<i64>,
+    /// What the address is worked out from before each start, if it expires.
+    #[serde(default)]
+    pub source: Option<crate::Source>,
 }
 
 impl Download {
@@ -85,6 +88,7 @@ impl Download {
             segments: Vec::new(),
             added_at: None,
             last_try_at: None,
+            source: None,
         }
     }
 

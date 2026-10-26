@@ -15,13 +15,38 @@ use reqwest::Client;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
-use velo_core::{Download, DownloadId, DownloadState, EngineEvent, ProgressUpdate, Queue, QueueId};
+use velo_core::{
+    Download, DownloadId, DownloadState, EngineEvent, ProgressUpdate, Queue, QueueId, Resolver,
+    Source,
+};
 
 use crate::download::{RunContext, Stage, remove_dir, run};
 use crate::scheduler;
 use velo_core::Settings;
 
 use crate::{Error, Limiter, Options, Progress, RequestOptions, Result, client_with};
+
+/// Gives `download` its current address from its source, if it has one.
+async fn refresh(
+    download: &mut Download,
+    resolver: Option<&dyn Resolver>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let Some(source) = download.source.clone() else {
+        return Ok(());
+    };
+    let resolver =
+        resolver.ok_or_else(|| Error::Resolve("this download needs YouTube support".into()))?;
+    let urls = crate::fetch::cancellable(cancel, async {
+        resolver.resolve(&source).await.map_err(Error::Resolve)
+    })
+    .await?;
+    download.url = urls
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Resolve("no address".into()))?;
+    Ok(())
+}
 
 /// How often running downloads report [`EngineEvent::Progress`].
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -42,6 +67,9 @@ pub struct EngineConfig {
     pub settings: Settings,
     /// How failed requests are retried.
     pub retry: RetryPolicy,
+    /// Works out the current address of downloads with a [`Source`] before each start; such
+    /// downloads fail without one.
+    pub resolver: Option<Arc<dyn Resolver>>,
 }
 
 /// How a segment is retried after a network error, a cut-off connection or a `408`, `429` or
@@ -82,6 +110,8 @@ pub struct NewDownload {
     /// Login, referer and cookies to send. Kept in memory only, so a download that needs them
     /// can't resume after the app restarts until they are given again.
     pub request: RequestOptions,
+    /// What `url` is worked out from again before each start, if it expires.
+    pub source: Option<Source>,
 }
 
 /// Changes to a download's details, from its Properties.
@@ -189,6 +219,7 @@ impl Engine {
         download.category = new.category;
         download.description = new.description;
         download.added_at = Some(now());
+        download.source = new.source;
         self.send(Command::Add(Box::new(download), new.start, new.request));
         id
     }
@@ -557,7 +588,13 @@ impl Actor {
             max_retries: self.config.retry.max_retries,
             retry_delay: self.config.retry.delay,
             limiters: vec![self.global.clone(), own_limit],
+            max_request_size: entry
+                .download
+                .source
+                .as_ref()
+                .and_then(Source::max_request_size),
         };
+        let resolver = self.config.resolver.clone();
         let progress = running.progress.clone();
         let (cancel, tx) = (running.cancel.clone(), self.task_tx.clone());
         entry.running = Some(running);
@@ -572,10 +609,15 @@ impl Actor {
                 progress: &progress,
                 cancel: &cancel,
             };
-            let result = run(&context, &mut download, |stage, d| {
-                let _ = tx.send(TaskMessage::Stage(stage, d.clone()));
-            })
-            .await;
+            let result = match refresh(&mut download, resolver.as_deref(), &cancel).await {
+                Ok(()) => {
+                    run(&context, &mut download, |stage, d| {
+                        let _ = tx.send(TaskMessage::Stage(stage, d.clone()));
+                    })
+                    .await
+                }
+                Err(error) => Err(error),
+            };
             let _ = tx.send(TaskMessage::Done(download, result));
         });
     }
