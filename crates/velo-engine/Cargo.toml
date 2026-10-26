@@ -9,9 +9,17 @@ publish.workspace = true
 
 [dependencies]
 velo-core.workspace = true
+percent-encoding.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
 
 [dev-dependencies]
+axum.workspace = true
 proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 
 [lints]
 workspace = true

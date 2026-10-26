@@ -29,6 +29,12 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# Mozilla's CA root list, as data. rustls-platform-verifier uses it only on targets without a
+# system trust store (none of ours), but cargo-deny checks every target.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 # Slint, winit and the platform crates pull in several versions of some crates; report, don't fail.
 multiple-versions = "warn"
