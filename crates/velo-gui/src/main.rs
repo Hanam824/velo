@@ -7,6 +7,7 @@ mod add;
 mod app;
 mod bridge;
 mod categories;
+mod category;
 mod complete;
 mod config;
 mod format;
@@ -301,6 +302,13 @@ mod tests {
             },
         ])));
         snapshot::save(&window, &options, 640, 480, &dir.join("options-dark.png"));
+        options.hide().unwrap();
+
+        let category = CategoryWindow::new().unwrap();
+        category.set_name("Images".into());
+        category.set_extensions("png jpg webp".into());
+        category.set_default_folder("/Users/me/Downloads".into());
+        snapshot::save(&window, &category, 480, 180, &dir.join("category.png"));
     }
 
     /// Six segments of a `total`-byte file in different states, as the planner would leave them.

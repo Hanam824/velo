@@ -12,9 +12,10 @@ use velo_core::{Download, DownloadId, DownloadState, EngineEvent};
 use velo_engine::{DownloadEdit, Engine, NewDownload};
 
 use crate::categories::CategoryTree;
+use crate::category::CategoryDialog;
 use crate::complete::{Completion, Desktop};
 use crate::config::Config;
-use crate::list::{Column, DownloadTable};
+use crate::list::{Column, DownloadTable, Filter};
 use crate::progress::ProgressDialogs;
 use crate::properties::PropertiesDialogs;
 use crate::toolbar::ToolbarState;
@@ -87,6 +88,7 @@ pub struct App {
     completion: Rc<Completion>,
     desktop: Rc<dyn Desktop>,
     config: Rc<Config>,
+    category_dialog: Rc<CategoryDialog>,
 }
 
 impl App {
@@ -105,6 +107,11 @@ impl App {
             ui: ui.as_weak(),
             progress: ProgressDialogs::new(commands.clone(), config.clone()),
             properties: PropertiesDialogs::new(commands.clone(), desktop.clone(), config.clone()),
+            category_dialog: CategoryDialog::new(
+                config.clone(),
+                commands.clone(),
+                config.default_downloads().to_path_buf(),
+            ),
             config: config.clone(),
             completion: Completion::new(config, desktop.clone()),
             desktop,
@@ -127,6 +134,26 @@ impl App {
             app.tree.borrow_mut().toggle(&key);
             app.category_rows.set_vec(app.tree.borrow().visible());
         }));
+        ui.on_category_selected(with(self, |app, key: slint::SharedString| {
+            app.table.borrow_mut().set_filter(Filter::from_key(&key));
+            app.refresh();
+        }));
+        ui.on_add_category(with0(self, |app| app.open_category(None)));
+        ui.on_edit_category(with(self, |app, key: slint::SharedString| {
+            app.open_category(category_name(&key));
+        }));
+        ui.on_delete_category(with(self, |app, key: slint::SharedString| {
+            if let Some(name) = category_name(&key) {
+                let downloads = app.table.borrow().downloads().to_vec();
+                app.category_dialog.delete(&name, &downloads);
+            }
+        }));
+        let this = Rc::downgrade(self);
+        self.category_dialog.on_changed(move || {
+            if let Some(app) = this.upgrade() {
+                app.rebuild_categories();
+            }
+        });
         ui.on_selection_changed(with(self, |app, _| app.refresh()));
         ui.on_sort(with(self, |app, column| {
             if let Some(column) = Column::from_index(column) {
@@ -210,6 +237,35 @@ impl App {
         self.progress.window(id)
     }
 
+    /// Opens the category dialog to add one, or to edit category `name`.
+    fn open_category(&self, name: Option<String>) {
+        // The downloads as they are when the dialog opens, to re-file on a rename.
+        let downloads = self.table.borrow().downloads().to_vec();
+        if let Err(error) = self
+            .category_dialog
+            .open(name, Rc::new(move || downloads.clone()))
+        {
+            eprintln!("velo: couldn't open the category dialog: {error}");
+        }
+    }
+
+    /// Rebuilds the Categories tree after the categories changed, keeping the selection if it
+    /// still exists.
+    fn rebuild_categories(&self) {
+        let settings = self.config.settings();
+        let mut tree = self.tree.borrow_mut();
+        tree.rebuild(&settings.categories);
+        self.category_rows.set_vec(tree.visible());
+        if let Some(ui) = self.ui.upgrade()
+            && !tree.contains(&ui.get_selected_category())
+        {
+            ui.set_selected_category("all".into());
+            self.table.borrow_mut().set_filter(Filter::default());
+        }
+        drop(tree);
+        self.refresh();
+    }
+
     /// The saved file of download `id`, if it is complete.
     fn finished_file(&self, id: DownloadId) -> Option<std::path::PathBuf> {
         let table = self.table.borrow();
@@ -266,7 +322,7 @@ impl App {
     /// The selected download, if it still exists.
     pub fn selected(&self) -> Option<DownloadId> {
         let id = download_id(self.ui.upgrade()?.get_selected_id())?;
-        self.table.borrow().get(id).map(|d| d.id)
+        self.table.borrow().is_visible(id).then_some(id)
     }
 
     /// Pushes the table into the window: rows, sort arrows, toolbar state and status bar.
@@ -294,10 +350,12 @@ impl App {
         }
         ToolbarState::new(selected, table.downloads()).apply(&ui);
 
-        let count = table.downloads().len();
-        ui.set_status_message(match count {
-            1 => "1 download".into(),
-            n => format!("{n} downloads").into(),
+        let (shown, total) = (table.visible_count(), table.downloads().len());
+        let noun = if total == 1 { "download" } else { "downloads" };
+        ui.set_status_message(if shown == total {
+            format!("{total} {noun}").into()
+        } else {
+            format!("{shown} of {total} {noun}").into()
         });
         let total_rate: u64 = table.downloads().iter().map(|d| table.rate_of(d.id)).sum();
         ui.set_status_summary(format::rate(total_rate).into());
@@ -337,6 +395,13 @@ fn on_row(app: &Rc<App>, f: impl Fn(&App, DownloadId) + 'static) -> impl Fn(i32)
             f(app, id);
         }
     })
+}
+
+/// The category name in a Categories tree key such as `all/Video`.
+fn category_name(key: &str) -> Option<String> {
+    key.split_once('/')
+        .filter(|(group, _)| matches!(*group, "all" | "unfinished" | "finished"))
+        .map(|(_, name)| name.to_string())
 }
 
 /// A download id from the UI's `int`, which is -1 for none.
@@ -458,6 +523,37 @@ pub mod tests {
 
         ui.invoke_appearance_changed(crate::Appearance::Light);
         assert_eq!(config.settings().appearance, velo_core::Appearance::Light);
+    }
+
+    #[test]
+    fn the_tree_filters_the_list_and_category_changes_rebuild_it() {
+        let (ui, app, _) = app();
+        let mut video = sample(1, "a.mkv", DownloadState::Complete, 1, 1);
+        video.category = Some("Video".into());
+        app.apply([
+            EngineEvent::Added(video),
+            EngineEvent::Added(sample(2, "b.dat", DownloadState::Paused, 0, 1)),
+        ]);
+        ui.set_selected_id(2);
+        ui.invoke_category_selected("all/Video".into());
+        assert_eq!(ui.get_downloads().row_count(), 1);
+        assert_eq!(ui.get_status_message(), "1 of 2 downloads");
+        // The selection is hidden by the filter, so nothing is selected.
+        assert_eq!(ui.get_selected_id(), -1);
+
+        // Deleting the selected category falls back to All Downloads.
+        ui.set_selected_category("all/Video".into());
+        ui.invoke_delete_category("all/Video".into());
+        assert_eq!(ui.get_selected_category(), "all");
+        assert_eq!(ui.get_downloads().row_count(), 2);
+        let keys: Vec<String> = ui
+            .get_categories()
+            .iter()
+            .map(|row| row.key.to_string())
+            .collect();
+        assert!(!keys.contains(&"all/Video".to_string()));
+        assert_eq!(category_name("unfinished/Music").as_deref(), Some("Music"));
+        assert_eq!(category_name("queue/0"), None);
     }
 
     #[test]

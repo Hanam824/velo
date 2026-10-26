@@ -45,6 +45,58 @@ impl Column {
     }
 }
 
+/// Which downloads the list shows, from the row selected in the Categories tree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Filter {
+    /// Only unfinished (`Some(false)`) or finished (`Some(true)`) downloads; both if `None`.
+    pub finished: Option<bool>,
+    /// Only downloads in this category.
+    pub category: Option<String>,
+    /// Only downloads in a queue (`Some(None)`) or in this queue (`Some(Some(id))`).
+    pub queue: Option<Option<u32>>,
+}
+
+impl Filter {
+    /// The filter for a Categories tree key such as `all`, `unfinished/Video`, `queues` or
+    /// `queue/0`; unknown keys show everything.
+    pub fn from_key(key: &str) -> Self {
+        let (group, category) = match key.split_once('/') {
+            Some((group, rest)) => (group, Some(rest.to_string())),
+            None => (key, None),
+        };
+        match group {
+            "unfinished" | "finished" => Self {
+                finished: Some(group == "finished"),
+                category,
+                queue: None,
+            },
+            "queues" => Self {
+                queue: Some(None),
+                ..Self::default()
+            },
+            "queue" => Self {
+                queue: Some(category.and_then(|id| id.parse().ok())),
+                ..Self::default()
+            },
+            _ => Self {
+                category,
+                ..Self::default()
+            },
+        }
+    }
+
+    /// Whether `download` passes the filter. Queue membership comes with the queues (D19);
+    /// until then the queue rows are empty.
+    pub fn accepts(&self, download: &Download) -> bool {
+        self.finished.is_none_or(|f| download.is_finished() == f)
+            && self
+                .category
+                .as_ref()
+                .is_none_or(|c| download.category.as_ref() == Some(c))
+            && self.queue.is_none()
+    }
+}
+
 /// Every download the app knows, with live progress for the running ones.
 #[derive(Debug)]
 pub struct DownloadTable {
@@ -52,6 +104,7 @@ pub struct DownloadTable {
     progress: HashMap<DownloadId, ProgressUpdate>,
     sort: Column,
     ascending: bool,
+    filter: Filter,
 }
 
 impl Default for DownloadTable {
@@ -61,6 +114,7 @@ impl Default for DownloadTable {
             progress: HashMap::new(),
             sort: Column::LastTry,
             ascending: false,
+            filter: Filter::default(),
         }
     }
 }
@@ -100,6 +154,24 @@ impl DownloadTable {
         &self.downloads
     }
 
+    /// Shows only the downloads `filter` accepts.
+    pub fn set_filter(&mut self, filter: Filter) {
+        self.filter = filter;
+    }
+
+    /// Whether download `id` exists and passes the filter.
+    pub fn is_visible(&self, id: DownloadId) -> bool {
+        self.get(id).is_some_and(|d| self.filter.accepts(d))
+    }
+
+    /// How many downloads pass the filter.
+    pub fn visible_count(&self) -> usize {
+        self.downloads
+            .iter()
+            .filter(|d| self.filter.accepts(d))
+            .count()
+    }
+
     /// The column the rows are sorted by, and whether ascending.
     pub fn sort_order(&self) -> (Column, bool) {
         (self.sort, self.ascending)
@@ -117,7 +189,11 @@ impl DownloadTable {
 
     /// The downloads in display order.
     fn sorted(&self) -> Vec<&Download> {
-        let mut sorted: Vec<&Download> = self.downloads.iter().collect();
+        let mut sorted: Vec<&Download> = self
+            .downloads
+            .iter()
+            .filter(|d| self.filter.accepts(d))
+            .collect();
         sorted.sort_by(|a, b| {
             let order = self.compare(a, b).then(a.id.cmp(&b.id));
             if self.ascending {
@@ -395,6 +471,34 @@ pub mod tests {
         );
         table.remove(DownloadId(2));
         assert_eq!(table.neighbour(Some(DownloadId(1)), 1), Some(DownloadId(3)));
+    }
+
+    #[test]
+    fn tree_keys_filter_by_group_category_and_queue() {
+        let mut table = DownloadTable::default();
+        let mut video = sample(1, "a.mkv", DownloadState::Complete, 1, 1);
+        video.category = Some("Video".into());
+        let mut music = sample(2, "b.mp3", DownloadState::Paused, 0, 1);
+        music.category = Some("Music".into());
+        let plain = sample(3, "c.dat", DownloadState::Downloading, 0, 1);
+        for download in [video, music, plain] {
+            table.upsert(download);
+        }
+        table.sort_by(Column::Name);
+        let shown = |table: &mut DownloadTable, key: &str| {
+            table.set_filter(Filter::from_key(key));
+            names(table)
+        };
+        assert_eq!(shown(&mut table, "all"), ["a.mkv", "b.mp3", "c.dat"]);
+        assert_eq!(shown(&mut table, "all/Music"), ["b.mp3"]);
+        assert_eq!(shown(&mut table, "unfinished"), ["b.mp3", "c.dat"]);
+        assert_eq!(shown(&mut table, "finished"), ["a.mkv"]);
+        assert_eq!(shown(&mut table, "finished/Music"), Vec::<String>::new());
+        assert_eq!(shown(&mut table, "queue/0"), Vec::<String>::new());
+        table.set_filter(Filter::from_key("unfinished/Music"));
+        assert_eq!(table.visible_count(), 1);
+        assert!(table.is_visible(DownloadId(2)) && !table.is_visible(DownloadId(1)));
+        assert_eq!(table.neighbour(None, 1), Some(DownloadId(2)));
     }
 
     #[test]

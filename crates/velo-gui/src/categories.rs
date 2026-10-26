@@ -50,6 +50,18 @@ impl CategoryTree {
         }
     }
 
+    /// Rebuilds the rows for `categories`, keeping which groups are collapsed.
+    pub fn rebuild(&mut self, categories: &[Category]) {
+        let collapsed = std::mem::take(&mut self.collapsed);
+        *self = Self::new(categories);
+        self.collapsed = collapsed;
+    }
+
+    /// Whether a row has `key`.
+    pub fn contains(&self, key: &str) -> bool {
+        self.rows.iter().any(|row| row.key == key)
+    }
+
     /// Expands the row with `key` if it is collapsed, and collapses it otherwise.
     pub fn toggle(&mut self, key: &str) {
         if !self.collapsed.remove(key) {

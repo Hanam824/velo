@@ -52,6 +52,11 @@ impl Config {
             .unwrap_or_else(|| self.default_downloads.clone())
     }
 
+    /// The downloads folder used when the settings don't name one.
+    pub fn default_downloads(&self) -> &Path {
+        &self.default_downloads
+    }
+
     /// The category whose extensions include `file_name`'s.
     pub fn category_for(&self, file_name: &str) -> Option<String> {
         Category::for_file_name(&self.settings.borrow().categories, file_name)
