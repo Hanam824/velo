@@ -5,14 +5,20 @@ use std::sync::Once;
 
 use velo_core::{DownloadId, Segment};
 
+mod download;
 mod fetch;
 mod filename;
+mod merge;
 pub mod planner;
 mod probe;
+mod segmented;
 
+pub use download::download_file;
 pub use fetch::fetch_range;
 pub use filename::{file_name, sanitize_file_name};
+pub use merge::merge;
 pub use probe::{Probe, probe};
+pub use segmented::{Options, Progress, download_segments};
 
 /// Errors from the download engine.
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +43,31 @@ pub enum Error {
         /// Bytes that were expected.
         expected: u64,
     },
+    /// A merge was asked for before every segment was done, or the segments don't cover the
+    /// whole file.
+    #[error("the download isn't finished")]
+    NotFinished,
+    /// A part file's size doesn't match its segment.
+    #[error("part file {path} holds {actual} bytes, expected {expected}")]
+    PartSize {
+        /// The part file.
+        path: PathBuf,
+        /// The segment's length.
+        expected: u64,
+        /// The part file's size.
+        actual: u64,
+    },
+    /// The merged file's size doesn't match the server's.
+    #[error("merged file holds {actual} bytes, expected {expected}")]
+    SizeMismatch {
+        /// Size from the server.
+        expected: u64,
+        /// Size of the merged file.
+        actual: u64,
+    },
+    /// Something already exists at the save path.
+    #[error("{0} already exists")]
+    Exists(PathBuf),
 }
 
 /// Result with [`Error`] as the default error type.

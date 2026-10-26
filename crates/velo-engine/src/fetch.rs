@@ -4,7 +4,7 @@ use std::io::SeekFrom;
 use std::path::Path;
 
 use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Client, Response, StatusCode, Url};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 
@@ -52,33 +52,15 @@ pub async fn fetch_range(
     file.seek(SeekFrom::Start(have)).await?;
 
     let position = start + have;
-    let mut request = client.get(url.clone());
-    let ranged = position > 0 || end.is_some();
-    if ranged {
-        let range = match end {
-            Some(end) => format!("bytes={position}-{}", end - 1),
-            None => format!("bytes={position}-"),
-        };
-        request = request.header(RANGE, range);
-    }
-    let mut response = request.send().await?;
-    let status = response.status();
-    if ranged {
-        let range_start = response
-            .headers()
-            .get(CONTENT_RANGE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(content_range_start);
-        if status != StatusCode::PARTIAL_CONTENT || range_start != Some(position) {
-            return Err(if status.is_success() {
-                Error::RangeIgnored
-            } else {
-                Error::Status(status)
-            });
+    let mut response = if position > 0 || end.is_some() {
+        send_range(client, url, position, end).await?
+    } else {
+        let response = client.get(url.clone()).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::Status(response.status()));
         }
-    } else if !status.is_success() {
-        return Err(Error::Status(status));
-    }
+        response
+    };
     let expected = match end {
         Some(end) => Some(end - start),
         None => response
@@ -111,5 +93,33 @@ pub async fn fetch_range(
             expected,
         }),
         _ => Ok(have),
+    }
+}
+
+/// Sends `GET` with `Range: bytes=<position>-[<end - 1>]` and checks that the answer is a `206`
+/// starting at `position`.
+pub(crate) async fn send_range(
+    client: &Client,
+    url: &Url,
+    position: u64,
+    end: Option<u64>,
+) -> Result<Response> {
+    let range = match end {
+        Some(end) => format!("bytes={position}-{}", end - 1),
+        None => format!("bytes={position}-"),
+    };
+    let response = client.get(url.clone()).header(RANGE, range).send().await?;
+    let status = response.status();
+    let range_start = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(content_range_start);
+    if status == StatusCode::PARTIAL_CONTENT && range_start == Some(position) {
+        Ok(response)
+    } else if status.is_success() {
+        Err(Error::RangeIgnored)
+    } else {
+        Err(Error::Status(status))
     }
 }
