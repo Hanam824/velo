@@ -52,6 +52,9 @@ export component AppWindow inherits Window {
     in property <[QueueChoice]> queue-choices;
 
     callback add-url();
+    callback add-batch();
+    callback import-list();
+    callback export-list();
     callback resume();
     callback stop();
     callback stop-all();
@@ -113,6 +116,19 @@ export component AppWindow inherits Window {
             MenuItem {
                 title: "Add New Download…";
                 activated => { root.add-url(); }
+            }
+            MenuItem {
+                title: "Add Batch Download…";
+                activated => { root.add-batch(); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Import List…";
+                activated => { root.import-list(); }
+            }
+            MenuItem {
+                title: "Export List…";
+                activated => { root.export-list(); }
             }
             MenuSeparator {}
             MenuItem {

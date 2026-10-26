@@ -5,6 +5,7 @@
 
 mod add;
 mod app;
+mod batch;
 mod bridge;
 mod categories;
 mod category;
@@ -31,6 +32,7 @@ use velo_store::Store;
 
 use crate::add::{Adder, Preset, is_download_url};
 use crate::app::{App, Commands};
+use crate::batch::BatchDialog;
 use crate::bridge::{Bridge, BridgeConfig};
 use crate::complete::{Desktop, SystemDesktop};
 use crate::config::Config;
@@ -40,6 +42,9 @@ slint::include_modules!();
 
 /// How often the UI takes in engine events.
 const UI_REFRESH: Duration = Duration::from_millis(250);
+
+/// How often the clipboard is checked for a copied download address.
+const CLIPBOARD_POLL: Duration = Duration::from_secs(1);
 
 /// Creates the main window and its state, sending engine commands to `commands` and desktop
 /// actions to `desktop`.
@@ -124,6 +129,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     ui.on_add_url(open_add.clone());
+    let batch = BatchDialog::new(config.clone(), adder.clone());
+    ui.on_add_batch(move || {
+        if let Err(error) = batch.open() {
+            eprintln!("velo: couldn't open Add Batch Download: {error}");
+        }
+    });
+    {
+        let (adder, config) = (adder.clone(), config.clone());
+        ui.on_import_list(move || import_list(&adder, &config));
+    }
+    {
+        let (app, config) = (Rc::downgrade(&app), config.clone());
+        ui.on_export_list(move || {
+            if let Some(app) = app.upgrade() {
+                export_list(&app.urls(), &config);
+            }
+        });
+    }
 
     // Messages from other processes wait here for the UI thread, which takes them on its timer.
     let (requests_tx, requests) = std::sync::mpsc::channel();
@@ -182,14 +205,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    // Offers to download an address copied anywhere, if its file type is one to capture.
+    let clipboard_timer = slint::Timer::default();
+    {
+        let (adder, config) = (adder.clone(), config.clone());
+        let mut clipboard = velo_platform::ClipboardWatcher::new();
+        clipboard_timer.start(slint::TimerMode::Repeated, CLIPBOARD_POLL, move || {
+            let settings = config.settings();
+            if !settings.monitor_clipboard {
+                return;
+            }
+            if let Some(url) = clipboard
+                .copied()
+                .and_then(|text| velo_core::links::capture(&text, &settings.capture_extensions))
+                && let Err(error) = adder.open_info(url, None, Preset::default())
+            {
+                eprintln!("velo: couldn't open Download File Info: {error}");
+            }
+        });
+    }
     ui.show()?;
     slint::run_event_loop_until_quit()?;
 
     // Pause what is running and save it before exiting.
     drop(timer);
+    drop(clipboard_timer);
     drop(tray);
     bridge.shutdown();
     Ok(())
+}
+
+/// Adds every address in a list file the user picks to the main queue.
+fn import_list(adder: &Adder, config: &Config) {
+    let Some(path) = velo_platform::pick_file(&config.save_dir(None), "Address lists", &["txt"])
+    else {
+        return;
+    };
+    let message = match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let urls = velo_core::links::read_list(&text);
+            adder.add_many(&urls, None, false);
+            match urls.len() {
+                1 => "Added 1 download to the main queue.".to_string(),
+                n => format!("Added {n} downloads to the main queue."),
+            }
+        }
+        Err(error) => format!("Couldn't read {}: {error}", path.display()),
+    };
+    tell("Import List", &message);
+}
+
+/// Writes `urls` to a list file the user picks, one per line.
+fn export_list(urls: &[String], config: &Config) {
+    let Some(path) = velo_platform::pick_save_path(&config.save_dir(None), "velo-downloads.txt")
+    else {
+        return;
+    };
+    let text = velo_core::links::write_list(urls.iter().map(String::as_str));
+    let message = match std::fs::write(&path, text) {
+        Ok(()) => format!("Saved {} addresses to {}.", urls.len(), path.display()),
+        Err(error) => format!("Couldn't save {}: {error}", path.display()),
+    };
+    tell("Export List", &message);
+}
+
+/// Shows `message` as a notification titled `title`, or on stderr if notifications fail.
+fn tell(title: &str, message: &str) {
+    if velo_platform::notify(title, message).is_err() {
+        eprintln!("velo: {message}");
+    }
 }
 
 /// Carries out a request from another process, such as `velo-cli` or a second launch.
@@ -407,6 +491,25 @@ mod tests {
         ])));
         snapshot::save(&window, &options, 640, 480, &dir.join("options-dark.png"));
         options.hide().unwrap();
+
+        let batch = BatchWindow::new().unwrap();
+        batch.set_pattern("https://photos.example.org/trip/IMG_*.jpg".into());
+        batch.set_from("1".into());
+        batch.set_to("120".into());
+        batch.set_digits(4);
+        batch.set_default_folder("/Users/me/Downloads".into());
+        batch.set_count(120);
+        batch.set_preview(slint::ModelRc::new(slint::VecModel::from(
+            (1..=8)
+                .map(|n| {
+                    slint::StandardListViewItem::from(
+                        format!("https://photos.example.org/trip/IMG_{n:04}.jpg").as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )));
+        snapshot::save(&window, &batch, 560, 460, &dir.join("batch.png"));
+        batch.hide().unwrap();
 
         let category = CategoryWindow::new().unwrap();
         category.set_name("Images".into());

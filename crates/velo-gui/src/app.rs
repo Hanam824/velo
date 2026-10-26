@@ -457,6 +457,13 @@ impl App {
         }
     }
 
+    /// The address of every download in the list, in the order they were added.
+    pub fn urls(&self) -> Vec<String> {
+        let mut downloads = self.table.borrow().downloads().to_vec();
+        downloads.sort_by_key(|d| d.id);
+        downloads.into_iter().map(|d| d.url).collect()
+    }
+
     /// The selected download, if it still exists.
     pub fn selected(&self) -> Option<DownloadId> {
         let id = download_id(self.ui.upgrade()?.get_selected_id())?;

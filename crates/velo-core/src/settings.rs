@@ -42,6 +42,12 @@ pub struct Settings {
     pub appearance: Appearance,
     /// Whether closing the main window keeps Velo running in the tray.
     pub close_to_tray: bool,
+    /// Whether an address copied to the clipboard is offered for download if its file has one
+    /// of [`Settings::capture_extensions`].
+    pub monitor_clipboard: bool,
+    /// File extensions, lowercase and without the dot, that Velo offers to download when such
+    /// an address is copied.
+    pub capture_extensions: Vec<String>,
 }
 
 /// The colour scheme of Velo's windows.
@@ -181,8 +187,21 @@ impl Default for Settings {
             show_complete_dialog: true,
             appearance: Appearance::System,
             close_to_tray: true,
+            monitor_clipboard: true,
+            capture_extensions: default_capture_extensions(),
         }
     }
+}
+
+/// Every extension of the built-in categories, sorted.
+fn default_capture_extensions() -> Vec<String> {
+    let mut extensions: Vec<String> = Category::defaults()
+        .into_iter()
+        .flat_map(|c| c.extensions)
+        .collect();
+    extensions.sort();
+    extensions.dedup();
+    extensions
 }
 
 #[cfg(test)]

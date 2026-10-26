@@ -3,10 +3,12 @@
 //! This crate does no I/O. Types derive `serde` traits so that `velo-store` can persist them and
 //! `velo-ipc` can send them.
 
+pub mod batch;
 mod category;
 mod download;
 mod event;
 pub mod format;
+pub mod links;
 mod queue;
 mod segment;
 mod settings;
