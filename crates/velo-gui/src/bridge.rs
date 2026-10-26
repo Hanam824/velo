@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use tokio::sync::{broadcast, oneshot};
-use velo_core::{Download, EngineEvent, Settings};
+use velo_core::{Download, EngineEvent, Queue, Settings};
 use velo_engine::{Credentials, Engine, EngineConfig, RequestOptions, RetryPolicy};
 use velo_store::Store;
 
@@ -31,6 +31,8 @@ pub struct BridgeConfig {
     pub store: Store,
     /// Downloads restored from the store.
     pub downloads: Vec<Download>,
+    /// Queues restored from the store.
+    pub queues: Vec<Queue>,
 }
 
 /// The running engine thread.
@@ -59,6 +61,7 @@ impl Bridge {
             retry,
             store,
             downloads,
+            queues,
         } = config;
 
         let thread = std::thread::Builder::new()
@@ -70,7 +73,7 @@ impl Bridge {
                         settings,
                         retry,
                     };
-                    let engine = match Engine::start(config, downloads) {
+                    let engine = match Engine::start(config, downloads, queues) {
                         Ok(engine) => engine,
                         Err(error) => {
                             let _ = engine_tx.send(Err(error));
@@ -85,6 +88,9 @@ impl Bridge {
                         persist_stopped,
                     ));
                     tokio::spawn(forward(engine.subscribe(), engine.clone(), events_tx));
+                    // Report every download and queue once, so the store and the UI start from
+                    // the engine's view (such as the main queue it creates if missing).
+                    engine.resync();
                     let _ = engine_tx.send(Ok(engine.clone()));
 
                     let _ = stopped.await;
@@ -253,6 +259,7 @@ mod tests {
             },
             store: Store::open(&database).unwrap(),
             downloads,
+            queues: Vec::new(),
         };
 
         let bridge = Bridge::start(config(Vec::new())).unwrap();

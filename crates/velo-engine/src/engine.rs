@@ -4,19 +4,21 @@
 //! so it can be used from the UI thread. Everything that happens comes back as
 //! [`EngineEvent`]s on a broadcast channel: the app's list and its store both listen there.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::NaiveDateTime;
 use reqwest::Client;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
-use velo_core::{Download, DownloadId, DownloadState, EngineEvent, ProgressUpdate};
+use velo_core::{Download, DownloadId, DownloadState, EngineEvent, ProgressUpdate, Queue, QueueId};
 
 use crate::download::{RunContext, Stage, remove_dir, run};
+use crate::scheduler;
 use velo_core::Settings;
 
 use crate::{Error, Limiter, Options, Progress, RequestOptions, Result, client_with};
@@ -27,6 +29,9 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 /// How many progress intervals pass between [`EngineEvent::Changed`] events that save a running
 /// download's segments (every 2 seconds).
 const SAVE_EVERY: u64 = 8;
+
+/// How many progress intervals pass between checks of the queues' schedules (every second).
+const SCHEDULE_EVERY: u64 = 4;
 
 /// What the engine needs to run downloads.
 #[derive(Debug, Clone)]
@@ -102,21 +107,37 @@ pub struct Engine {
     commands: mpsc::UnboundedSender<Command>,
     events: broadcast::Sender<EngineEvent>,
     next_id: Arc<AtomicU64>,
+    next_queue: Arc<AtomicU32>,
 }
 
 impl Engine {
-    /// Starts the engine task on the current tokio runtime with `downloads` restored from
-    /// storage.
+    /// Starts the engine task on the current tokio runtime with `downloads` and `queues`
+    /// restored from storage.
     ///
-    /// Downloads that were running when the app last stopped come back paused. Fails if the
-    /// HTTP client can't be built from the settings, such as for a malformed proxy.
+    /// Downloads that were running when the app last stopped come back paused, and no queue
+    /// runs until started or scheduled. The main download queue is created if missing. Fails if
+    /// the HTTP client can't be built from the settings, such as for a malformed proxy.
     ///
     /// # Panics
     /// If called outside a tokio runtime.
-    pub fn start(config: EngineConfig, downloads: Vec<Download>) -> Result<Self> {
+    pub fn start(
+        config: EngineConfig,
+        downloads: Vec<Download>,
+        queues: Vec<Queue>,
+    ) -> Result<Self> {
         let client = client_with(&config.settings, &RequestOptions::default())?;
         let global = Limiter::new(config.settings.speed_limit);
         let next_id = downloads.iter().map(|d| d.id.0 + 1).max().unwrap_or(1);
+        let known: HashSet<DownloadId> = downloads.iter().map(|d| d.id).collect();
+        let mut queues: BTreeMap<QueueId, Queue> = queues
+            .into_iter()
+            .map(|mut queue| {
+                queue.downloads.retain(|id| known.contains(id));
+                (queue.id, queue)
+            })
+            .collect();
+        queues.entry(QueueId::MAIN).or_insert_with(Queue::main);
+        let next_queue = queues.keys().map(|id| id.0 + 1).max().unwrap_or(1);
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(1024);
         let (task_tx, task_rx) = mpsc::unbounded_channel();
@@ -137,6 +158,11 @@ impl Engine {
                 .collect(),
             events: events.clone(),
             task_tx,
+            queues,
+            active: HashSet::new(),
+            held: HashSet::new(),
+            last_start: HashMap::new(),
+            last_stop: HashMap::new(),
             shutdown: Vec::new(),
         };
         tokio::spawn(actor.run(command_rx, task_rx));
@@ -144,6 +170,7 @@ impl Engine {
             commands,
             events,
             next_id: Arc::new(AtomicU64::new(next_id)),
+            next_queue: Arc::new(AtomicU32::new(next_queue)),
         })
     }
 
@@ -204,7 +231,47 @@ impl Engine {
         self.send(Command::Edit(id, edit));
     }
 
-    /// Sends [`EngineEvent::Changed`] for every download.
+    /// Adds an empty queue named `name` and returns its id.
+    pub fn add_queue(&self, name: impl Into<String>) -> QueueId {
+        let id = QueueId(self.next_queue.fetch_add(1, Ordering::Relaxed));
+        self.send(Command::AddQueue(Queue::new(id, name)));
+        id
+    }
+
+    /// Saves a queue's name, concurrency, schedule and the order of its downloads. Downloads
+    /// it doesn't already hold are ignored; ones added meanwhile go at the end.
+    pub fn save_queue(&self, queue: Queue) {
+        self.send(Command::SaveQueue(Box::new(queue)));
+    }
+
+    /// Deletes queue `id`, stopping it; its downloads stay. The main queue can't be deleted.
+    pub fn delete_queue(&self, id: QueueId) {
+        self.send(Command::DeleteQueue(id));
+    }
+
+    /// Moves `downloads` to the end of queue `queue`, out of any other queue.
+    pub fn enqueue(&self, queue: QueueId, downloads: Vec<DownloadId>) {
+        self.send(Command::Enqueue(queue, downloads));
+    }
+
+    /// Takes `downloads` out of their queues.
+    pub fn dequeue(&self, downloads: Vec<DownloadId>) {
+        self.send(Command::Dequeue(downloads));
+    }
+
+    /// Starts queue `id`: it runs its waiting and paused downloads in order, at most its
+    /// concurrency at a time, until none is left.
+    pub fn start_queue(&self, id: QueueId) {
+        self.send(Command::StartQueue(id));
+    }
+
+    /// Stops queue `id`, pausing the downloads it runs.
+    pub fn stop_queue(&self, id: QueueId) {
+        self.send(Command::StopQueue(id));
+    }
+
+    /// Sends [`EngineEvent::Changed`] for every download and [`EngineEvent::QueueChanged`] and
+    /// [`EngineEvent::QueueRunning`] for every queue.
     pub fn resync(&self) {
         self.send(Command::Resync);
     }
@@ -234,6 +301,13 @@ enum Command {
     SetSettings(Box<Settings>),
     SetSpeedLimit(DownloadId, Option<u64>),
     Edit(DownloadId, DownloadEdit),
+    AddQueue(Queue),
+    SaveQueue(Box<Queue>),
+    DeleteQueue(QueueId),
+    Enqueue(QueueId, Vec<DownloadId>),
+    Dequeue(Vec<DownloadId>),
+    StartQueue(QueueId),
+    StopQueue(QueueId),
     Resync,
     Shutdown(oneshot::Sender<()>),
 }
@@ -260,6 +334,14 @@ struct Actor {
     limiters: HashMap<DownloadId, Limiter>,
     /// Downloads' request options and the clients that send them.
     requests: HashMap<DownloadId, (RequestOptions, Client)>,
+    queues: BTreeMap<QueueId, Queue>,
+    /// The queues that run.
+    active: HashSet<QueueId>,
+    /// Downloads paused by hand, which a running queue leaves alone until started again.
+    held: HashSet<DownloadId>,
+    /// When each queue's schedule last started and stopped it, in local time.
+    last_start: HashMap<QueueId, NaiveDateTime>,
+    last_stop: HashMap<QueueId, NaiveDateTime>,
     /// Waiting [`Engine::shutdown`] calls; once set, the engine ends when nothing runs.
     shutdown: Vec<oneshot::Sender<()>>,
 }
@@ -316,6 +398,9 @@ impl Actor {
                 _ = clock.tick() => {
                     ticks += 1;
                     self.report_progress(ticks.is_multiple_of(SAVE_EVERY));
+                    if ticks.is_multiple_of(SCHEDULE_EVERY) {
+                        self.check_schedules(chrono::Local::now().naive_local());
+                    }
                 }
             }
             let idle = self.downloads.values().all(|e| e.running.is_none());
@@ -347,8 +432,12 @@ impl Actor {
                     self.start(id);
                 }
             }
-            Command::Resume(id) => self.start(id),
+            Command::Resume(id) => {
+                self.held.remove(&id);
+                self.start(id);
+            }
             Command::Pause(id) => {
+                self.held.insert(id);
                 if let Some(running) = self.downloads.get(&id).and_then(|e| e.running.as_ref()) {
                     running.cancel.cancel();
                 }
@@ -373,6 +462,41 @@ impl Actor {
             Command::SetSettings(settings) => self.set_settings(*settings),
             Command::SetSpeedLimit(id, rate) => self.limiter(id).set_rate(rate),
             Command::Edit(id, edit) => self.edit(id, edit),
+            Command::AddQueue(queue) => {
+                let id = queue.id;
+                self.queues.insert(id, queue);
+                self.emit_queue(id);
+            }
+            Command::SaveQueue(queue) => self.save_queue(*queue),
+            Command::DeleteQueue(id) => {
+                if id != QueueId::MAIN && self.queues.contains_key(&id) {
+                    self.stop_queue(id);
+                    self.queues.remove(&id);
+                    self.emit(EngineEvent::QueueRemoved(id));
+                }
+            }
+            Command::Enqueue(target, ids) => {
+                if !self.queues.contains_key(&target) {
+                    return;
+                }
+                let ids: Vec<DownloadId> = ids
+                    .into_iter()
+                    .filter(|id| self.downloads.contains_key(id))
+                    .collect();
+                self.take_out_of_queues(&ids, Some(target));
+                if let Some(queue) = self.queues.get_mut(&target) {
+                    for id in ids {
+                        if !queue.downloads.contains(&id) {
+                            queue.downloads.push(id);
+                        }
+                    }
+                }
+                self.emit_queue(target);
+                self.pump(target);
+            }
+            Command::Dequeue(ids) => self.take_out_of_queues(&ids, None),
+            Command::StartQueue(id) => self.start_queue(id),
+            Command::StopQueue(id) => self.stop_queue(id),
             Command::Resync => {
                 let all: Vec<_> = self
                     .downloads
@@ -382,9 +506,15 @@ impl Actor {
                 for download in all {
                     self.emit(EngineEvent::Changed(download));
                 }
+                let ids: Vec<QueueId> = self.queues.keys().copied().collect();
+                for id in ids {
+                    self.emit_queue(id);
+                    self.emit(EngineEvent::QueueRunning(id, self.active.contains(&id)));
+                }
             }
             Command::Shutdown(reply) => {
                 self.shutdown.push(reply);
+                self.active.clear();
                 self.handle(Command::PauseAll);
             }
         }
@@ -478,6 +608,169 @@ impl Actor {
         }
         let snapshot = entry.download.clone();
         self.emit(EngineEvent::Changed(snapshot));
+        if stopped && let Some(queue) = self.queue_of(id) {
+            self.pump(queue);
+        }
+    }
+
+    /// The queue download `id` is in, if any.
+    fn queue_of(&self, id: DownloadId) -> Option<QueueId> {
+        self.queues
+            .values()
+            .find(|q| q.downloads.contains(&id))
+            .map(|q| q.id)
+    }
+
+    /// Starts queue `id`, forgetting which of its downloads were paused by hand.
+    fn start_queue(&mut self, id: QueueId) {
+        let Some(queue) = self.queues.get(&id) else {
+            return;
+        };
+        for download in &queue.downloads {
+            self.held.remove(download);
+        }
+        if self.active.insert(id) {
+            self.emit(EngineEvent::QueueRunning(id, true));
+        }
+        self.pump(id);
+    }
+
+    /// Stops queue `id` and pauses what it runs.
+    fn stop_queue(&mut self, id: QueueId) {
+        if !self.active.remove(&id) {
+            return;
+        }
+        if let Some(queue) = self.queues.get(&id) {
+            for download in &queue.downloads {
+                if let Some(running) = self
+                    .downloads
+                    .get(download)
+                    .and_then(|e| e.running.as_ref())
+                {
+                    running.cancel.cancel();
+                }
+            }
+        }
+        self.emit(EngineEvent::QueueRunning(id, false));
+    }
+
+    /// Starts queue `id`'s next downloads while it has room, and marks it finished when nothing
+    /// is left to run.
+    fn pump(&mut self, id: QueueId) {
+        if !self.active.contains(&id) || !self.shutdown.is_empty() {
+            return;
+        }
+        let Some(queue) = self.queues.get(&id) else {
+            return;
+        };
+        let ids = queue.downloads.clone();
+        let limit = queue.max_concurrent.max(1) as usize;
+        let is_running = |actor: &Self, id: &DownloadId| {
+            actor.downloads.get(id).is_some_and(|e| e.running.is_some())
+        };
+        let mut free = limit.saturating_sub(ids.iter().filter(|d| is_running(self, d)).count());
+        for download in &ids {
+            if free == 0 {
+                break;
+            }
+            let waiting = self.downloads.get(download).is_some_and(|e| {
+                e.running.is_none()
+                    && matches!(
+                        e.download.state,
+                        DownloadState::Queued | DownloadState::Paused
+                    )
+            });
+            if waiting && !self.held.contains(download) {
+                self.start(*download);
+                free -= 1;
+            }
+        }
+        if !ids.iter().any(|d| is_running(self, d)) {
+            self.active.remove(&id);
+            self.emit(EngineEvent::QueueRunning(id, false));
+            self.emit(EngineEvent::QueueFinished(id));
+        }
+    }
+
+    /// Saves a queue's settings from the app, keeping its downloads to those it holds.
+    fn save_queue(&mut self, update: Queue) {
+        let Some(queue) = self.queues.get_mut(&update.id) else {
+            return;
+        };
+        if !update.name.trim().is_empty() {
+            queue.name = update.name.trim().to_string();
+        }
+        queue.max_concurrent = update.max_concurrent.max(1);
+        queue.schedule = update.schedule;
+        let mut order: Vec<DownloadId> = update
+            .downloads
+            .into_iter()
+            .filter(|id| queue.downloads.contains(id))
+            .collect();
+        for id in &queue.downloads {
+            if !order.contains(id) {
+                order.push(*id);
+            }
+        }
+        queue.downloads = order;
+        let id = queue.id;
+        self.emit_queue(id);
+        self.pump(id);
+    }
+
+    /// Takes `ids` out of every queue but `keep`, and reports the queues that changed.
+    fn take_out_of_queues(&mut self, ids: &[DownloadId], keep: Option<QueueId>) {
+        let mut changed = Vec::new();
+        for queue in self.queues.values_mut() {
+            if Some(queue.id) == keep {
+                continue;
+            }
+            let before = queue.downloads.len();
+            queue.downloads.retain(|id| !ids.contains(id));
+            if queue.downloads.len() != before {
+                changed.push(queue.id);
+            }
+        }
+        for id in changed {
+            self.emit_queue(id);
+            self.pump(id);
+        }
+    }
+
+    /// Starts and stops queues whose schedule says so at `now`, in local time.
+    fn check_schedules(&mut self, now: NaiveDateTime) {
+        let mut starts = Vec::new();
+        let mut stops = Vec::new();
+        for (id, queue) in &self.queues {
+            if scheduler::start_due(&queue.schedule, now, self.last_start.get(id).copied()) {
+                starts.push(*id);
+            }
+            if scheduler::stop_due(&queue.schedule, now, self.last_stop.get(id).copied()) {
+                stops.push(*id);
+            }
+        }
+        for id in stops {
+            self.last_stop.insert(id, now);
+            self.stop_queue(id);
+        }
+        for id in starts {
+            self.last_start.insert(id, now);
+            // A once-only start happens once.
+            if let Some(queue) = self.queues.get_mut(&id)
+                && queue.schedule.is_once()
+            {
+                queue.schedule.start_at = None;
+                self.emit_queue(id);
+            }
+            self.start_queue(id);
+        }
+    }
+
+    /// Reports queue `id` as it is now.
+    fn emit_queue(&self, id: QueueId) {
+        if let Some(queue) = self.queues.get(&id) {
+            self.emit(EngineEvent::QueueChanged(queue.clone()));
+        }
     }
 
     /// Sends progress for every running download, and with `save` also a
@@ -516,6 +809,8 @@ impl Actor {
         };
         self.requests.remove(&id);
         self.limiters.remove(&id);
+        self.held.remove(&id);
+        self.take_out_of_queues(&[id], None);
         let parts = self.config.temp_dir.join(id.0.to_string());
         let file =
             (delete_file && entry.download.is_finished()).then(|| entry.download.save_path());

@@ -1,0 +1,287 @@
+// The Scheduler: the queues on the left; the selected queue's schedule and files on the right.
+
+import { Button, CheckBox, LineEdit, SpinBox, StandardListView, TabWidget, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// A file in the selected queue.
+export struct QueuedFile {
+    name: string,
+    status: string,
+}
+
+// A start or stop time: whether it is on, and when.
+component TimeRow inherits HorizontalLayout {
+    in property <string> label;
+    in-out property <bool> enabled;
+    in-out property <int> hour;
+    in-out property <int> minute;
+    spacing: 8px;
+    CheckBox {
+        width: 170px;
+        text: root.label;
+        checked <=> root.enabled;
+    }
+    SpinBox {
+        width: 80px;
+        minimum: 0;
+        maximum: 23;
+        value <=> root.hour;
+        enabled: root.enabled;
+    }
+    Text {
+        text: ":";
+        vertical-alignment: center;
+        color: Theme.text;
+    }
+    SpinBox {
+        width: 80px;
+        minimum: 0;
+        maximum: 59;
+        value <=> root.minute;
+        enabled: root.enabled;
+    }
+    Rectangle { }
+}
+
+export component SchedulerWindow inherits Window {
+    // Queue names, with "(running)" for those that run.
+    in property <[StandardListViewItem]> queue-names;
+    in-out property <int> current-queue;
+    // Whether the selected queue is the main one, which can't be deleted.
+    in property <bool> is-main;
+    in property <bool> running;
+
+    // The selected queue's settings, applied with Apply.
+    in-out property <string> name;
+    in-out property <int> max-concurrent: 1;
+    in-out property <bool> start-enabled;
+    in-out property <int> start-hour;
+    in-out property <int> start-minute;
+    // Monday first.
+    in property <[bool]> days: [false, false, false, false, false, false, false];
+    in-out property <bool> stop-enabled;
+    in-out property <int> stop-hour;
+    in-out property <int> stop-minute;
+    in-out property <bool> exit-when-done;
+    in-out property <bool> shutdown-when-done;
+
+    in property <[QueuedFile]> files;
+    in-out property <int> current-file: -1;
+
+    callback queue-selected(index: int);
+    callback new-queue();
+    callback delete-queue();
+    callback day-toggled(day: int, on: bool);
+    callback move-file(delta: int);
+    callback remove-file();
+    callback start-now();
+    callback stop();
+    callback apply();
+    callback close-clicked();
+
+    title: "Scheduler";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 760px;
+    preferred-height: 460px;
+    min-width: 620px;
+    min-height: 380px;
+    background: Theme.window;
+
+    VerticalBox {
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 12px;
+            VerticalLayout {
+                width: 200px;
+                spacing: 6px;
+                StandardListView {
+                    vertical-stretch: 1;
+                    model: root.queue-names;
+                    current-item <=> root.current-queue;
+                    current-item-changed(index) => { root.queue-selected(index); }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Button {
+                        text: "New queue";
+                        clicked => { root.new-queue(); }
+                    }
+                    Button {
+                        text: "Delete";
+                        enabled: !root.is-main;
+                        clicked => { root.delete-queue(); }
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "Name:";
+                        vertical-alignment: center;
+                        color: Theme.text;
+                    }
+                    LineEdit {
+                        text <=> root.name;
+                    }
+                }
+                TabWidget {
+                    vertical-stretch: 1;
+                    Tab {
+                        title: "Schedule";
+                        VerticalBox {
+                            alignment: start;
+                            TimeRow {
+                                label: "Start download at";
+                                enabled <=> root.start-enabled;
+                                hour <=> root.start-hour;
+                                minute <=> root.start-minute;
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                padding-left: 24px;
+                                for day[index] in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]: CheckBox {
+                                    text: day;
+                                    enabled: root.start-enabled;
+                                    checked: root.days[index];
+                                    toggled => { root.day-toggled(index, self.checked); }
+                                }
+                            }
+                            Text {
+                                text: "With no day ticked, the queue starts once, at the next start time.";
+                                wrap: word-wrap;
+                                color: Theme.text-muted;
+                            }
+                            TimeRow {
+                                label: "Stop download at";
+                                enabled <=> root.stop-enabled;
+                                hour <=> root.stop-hour;
+                                minute <=> root.stop-minute;
+                            }
+                            CheckBox {
+                                text: "Exit Velo when the queue is done";
+                                checked <=> root.exit-when-done;
+                            }
+                            CheckBox {
+                                text: "Turn off computer when the queue is done";
+                                checked <=> root.shutdown-when-done;
+                            }
+                        }
+                    }
+                    Tab {
+                        title: "Files in the queue";
+                        VerticalBox {
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "Download";
+                                    vertical-alignment: center;
+                                    color: Theme.text;
+                                }
+                                SpinBox {
+                                    width: 80px;
+                                    minimum: 1;
+                                    maximum: 32;
+                                    value <=> root.max-concurrent;
+                                }
+                                Text {
+                                    text: "files at the same time";
+                                    vertical-alignment: center;
+                                    color: Theme.text;
+                                }
+                                Rectangle { }
+                            }
+                            HorizontalLayout {
+                                vertical-stretch: 1;
+                                spacing: 8px;
+                                if root.files.length == 0: Text {
+                                    horizontal-stretch: 1;
+                                    text: "No files in this queue. Use Add to Queue in a download's menu.";
+                                    wrap: word-wrap;
+                                    color: Theme.text-muted;
+                                }
+                                if root.files.length > 0: Rectangle {
+                                    horizontal-stretch: 1;
+                                    border-color: Theme.border;
+                                    border-width: 1px;
+                                    Flickable {
+                                        VerticalLayout {
+                                            alignment: start;
+                                            for file[index] in root.files: Rectangle {
+                                                height: 24px;
+                                                background: index == root.current-file ? Theme.selection
+                                                    : touch.has-hover ? Theme.hover : transparent;
+                                                touch := TouchArea {
+                                                    clicked => { root.current-file = index; }
+                                                }
+                                                HorizontalLayout {
+                                                    padding-left: 6px;
+                                                    padding-right: 6px;
+                                                    Text {
+                                                        text: (index + 1) + ".  " + file.name;
+                                                        overflow: elide;
+                                                        vertical-alignment: center;
+                                                        color: Theme.text;
+                                                    }
+                                                    Text {
+                                                        text: file.status;
+                                                        horizontal-alignment: right;
+                                                        vertical-alignment: center;
+                                                        color: Theme.text-muted;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: start;
+                                    spacing: 6px;
+                                    Button {
+                                        text: "Move up";
+                                        enabled: root.current-file > 0;
+                                        clicked => { root.move-file(-1); }
+                                    }
+                                    Button {
+                                        text: "Move down";
+                                        enabled: root.current-file >= 0 && root.current-file < root.files.length - 1;
+                                        clicked => { root.move-file(1); }
+                                    }
+                                    Button {
+                                        text: "Remove";
+                                        enabled: root.current-file >= 0;
+                                        clicked => { root.remove-file(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: "Start now";
+                enabled: !root.running;
+                clicked => { root.start-now(); }
+            }
+            Button {
+                text: "Stop";
+                enabled: root.running;
+                clicked => { root.stop(); }
+            }
+            Rectangle { }
+            Button {
+                text: "Apply";
+                primary: true;
+                clicked => { root.apply(); }
+            }
+            Button {
+                text: "Close";
+                clicked => { root.close-clicked(); }
+            }
+        }
+    }
+}

@@ -13,6 +13,7 @@ mod limiter;
 mod merge;
 pub mod planner;
 mod probe;
+pub mod scheduler;
 mod segmented;
 
 pub use download::download_file;

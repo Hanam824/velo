@@ -8,7 +8,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use slint::{ComponentHandle, Model, VecModel};
-use velo_core::{Download, DownloadId, DownloadState, EngineEvent};
+use std::collections::HashSet;
+
+use velo_core::{Download, DownloadId, DownloadState, EngineEvent, Queue, QueueId};
 use velo_engine::{DownloadEdit, Engine, NewDownload};
 
 use crate::categories::CategoryTree;
@@ -18,8 +20,9 @@ use crate::config::Config;
 use crate::list::{Column, DownloadTable, Filter};
 use crate::progress::ProgressDialogs;
 use crate::properties::PropertiesDialogs;
+use crate::scheduler::{Queues, SchedulerDialog};
 use crate::toolbar::ToolbarState;
-use crate::{AppWindow, CategoryItem, DownloadRow, format, theme};
+use crate::{AppWindow, CategoryItem, DownloadRow, QueueChoice, format, theme};
 
 /// The engine commands the main window sends.
 pub trait Commands {
@@ -39,6 +42,20 @@ pub trait Commands {
     fn edit(&self, id: DownloadId, edit: DownloadEdit);
     /// Uses `settings` from now on.
     fn set_settings(&self, settings: velo_core::Settings);
+    /// Adds an empty queue named `name` and returns its id.
+    fn add_queue(&self, name: &str) -> QueueId;
+    /// Saves a queue's name, concurrency, schedule and order.
+    fn save_queue(&self, queue: Queue);
+    /// Deletes queue `id`.
+    fn delete_queue(&self, id: QueueId);
+    /// Moves `downloads` to queue `queue`.
+    fn enqueue(&self, queue: QueueId, downloads: Vec<DownloadId>);
+    /// Takes `downloads` out of their queues.
+    fn dequeue(&self, downloads: Vec<DownloadId>);
+    /// Starts queue `id`.
+    fn start_queue(&self, id: QueueId);
+    /// Stops queue `id`.
+    fn stop_queue(&self, id: QueueId);
 }
 
 impl Commands for Engine {
@@ -73,6 +90,34 @@ impl Commands for Engine {
     fn set_settings(&self, settings: velo_core::Settings) {
         Engine::set_settings(self, settings);
     }
+
+    fn add_queue(&self, name: &str) -> QueueId {
+        Engine::add_queue(self, name)
+    }
+
+    fn save_queue(&self, queue: Queue) {
+        Engine::save_queue(self, queue);
+    }
+
+    fn delete_queue(&self, id: QueueId) {
+        Engine::delete_queue(self, id);
+    }
+
+    fn enqueue(&self, queue: QueueId, downloads: Vec<DownloadId>) {
+        Engine::enqueue(self, queue, downloads);
+    }
+
+    fn dequeue(&self, downloads: Vec<DownloadId>) {
+        Engine::dequeue(self, downloads);
+    }
+
+    fn start_queue(&self, id: QueueId) {
+        Engine::start_queue(self, id);
+    }
+
+    fn stop_queue(&self, id: QueueId) {
+        Engine::stop_queue(self, id);
+    }
 }
 
 /// The main window's state and the code that keeps the window in step with it.
@@ -89,6 +134,11 @@ pub struct App {
     desktop: Rc<dyn Desktop>,
     config: Rc<Config>,
     category_dialog: Rc<CategoryDialog>,
+    queues: Queues,
+    /// The queues that run.
+    running_queues: RefCell<HashSet<QueueId>>,
+    queue_choices: Rc<VecModel<QueueChoice>>,
+    scheduler: Rc<SchedulerDialog>,
 }
 
 impl App {
@@ -102,8 +152,13 @@ impl App {
     ) -> Rc<Self> {
         let settings = config.settings();
         theme::apply(ui, settings.appearance);
-        let tree = CategoryTree::new(&settings.categories);
+        let tree = CategoryTree::new(&settings.categories, &[]);
+        let queues: Queues = Rc::default();
         let app = Rc::new(Self {
+            scheduler: SchedulerDialog::new(commands.clone(), config.clone(), queues.clone()),
+            queues,
+            running_queues: RefCell::default(),
+            queue_choices: Rc::new(VecModel::default()),
             ui: ui.as_weak(),
             progress: ProgressDialogs::new(commands.clone(), config.clone()),
             properties: PropertiesDialogs::new(commands.clone(), desktop.clone(), config.clone()),
@@ -123,6 +178,7 @@ impl App {
         });
         ui.set_downloads(app.rows.clone().into());
         ui.set_categories(app.category_rows.clone().into());
+        ui.set_queue_choices(app.queue_choices.clone().into());
         app.connect(ui);
         app.refresh();
         app
@@ -155,6 +211,26 @@ impl App {
             }
         });
         ui.on_selection_changed(with(self, |app, _| app.refresh()));
+        ui.on_scheduler(with0(self, |app| {
+            let target = app.target_queue();
+            let running = app.running_queues.borrow().clone();
+            if let Err(error) = app.scheduler.open(target, &running, &app.table.borrow()) {
+                eprintln!("velo: couldn't open the Scheduler: {error}");
+            }
+        }));
+        ui.on_start_queue(with0(self, |app| {
+            app.commands.start_queue(app.target_queue())
+        }));
+        ui.on_stop_queue(with0(self, |app| {
+            app.commands.stop_queue(app.target_queue())
+        }));
+        let enqueue = with(self, |app, (raw, queue): (i32, i32)| {
+            if let (Some(id), Ok(queue)) = (download_id(raw), u32::try_from(queue)) {
+                app.commands.enqueue(QueueId(queue), vec![id]);
+            }
+        });
+        ui.on_enqueue(move |raw, queue| enqueue((raw, queue)));
+        ui.on_dequeue(on_row(self, |app, id| app.commands.dequeue(vec![id])));
         ui.on_sort(with(self, |app, column| {
             if let Some(column) = Column::from_index(column) {
                 app.table.borrow_mut().sort_by(column);
@@ -237,6 +313,38 @@ impl App {
         self.progress.window(id)
     }
 
+    /// The queue the toolbar's Start Queue and Stop Queue act on: the one selected in the tree,
+    /// else the main queue.
+    fn target_queue(&self) -> QueueId {
+        let selected = self
+            .ui
+            .upgrade()
+            .map(|ui| ui.get_selected_category().to_string())
+            .unwrap_or_default();
+        selected
+            .strip_prefix("queue/")
+            .and_then(|id| id.parse().ok())
+            .map(QueueId)
+            .filter(|id| self.queues.borrow().contains_key(id))
+            .unwrap_or(QueueId::MAIN)
+    }
+
+    /// Takes in a change to the queues: the table's membership, the tree and the menu.
+    fn queues_changed(&self) {
+        let queues = self.queues.borrow();
+        self.table.borrow_mut().set_queues(queues.values());
+        let choices: Vec<QueueChoice> = queues
+            .values()
+            .map(|q| QueueChoice {
+                id: q.id.0 as i32,
+                name: q.name.as_str().into(),
+            })
+            .collect();
+        self.queue_choices.set_vec(choices);
+        drop(queues);
+        self.rebuild_categories();
+    }
+
     /// Opens the category dialog to add one, or to edit category `name`.
     fn open_category(&self, name: Option<String>) {
         // The downloads as they are when the dialog opens, to re-file on a rename.
@@ -253,8 +361,9 @@ impl App {
     /// still exists.
     fn rebuild_categories(&self) {
         let settings = self.config.settings();
+        let queues: Vec<Queue> = self.queues.borrow().values().cloned().collect();
         let mut tree = self.tree.borrow_mut();
-        tree.rebuild(&settings.categories);
+        tree.rebuild(&settings.categories, &queues);
         self.category_rows.set_vec(tree.visible());
         if let Some(ui) = self.ui.upgrade()
             && !tree.contains(&ui.get_selected_category())
@@ -291,7 +400,9 @@ impl App {
     /// Updates the table from engine events and redraws once.
     pub fn apply(&self, events: impl IntoIterator<Item = EngineEvent>) {
         let mut changed = false;
+        let mut queues_changed = false;
         let mut finished: Vec<Download> = Vec::new();
+        let mut finished_queues: Vec<QueueId> = Vec::new();
         {
             let mut table = self.table.borrow_mut();
             for event in events {
@@ -306,8 +417,29 @@ impl App {
                     }
                     EngineEvent::Removed(id) => table.remove(id),
                     EngineEvent::Progress(update) => table.set_progress(update),
+                    EngineEvent::QueueChanged(queue) => {
+                        self.queues.borrow_mut().insert(queue.id, queue);
+                        queues_changed = true;
+                    }
+                    EngineEvent::QueueRemoved(id) => {
+                        self.queues.borrow_mut().remove(&id);
+                        self.running_queues.borrow_mut().remove(&id);
+                        queues_changed = true;
+                    }
+                    EngineEvent::QueueRunning(id, running) => {
+                        let mut set = self.running_queues.borrow_mut();
+                        if running {
+                            set.insert(id);
+                        } else {
+                            set.remove(&id);
+                        }
+                    }
+                    EngineEvent::QueueFinished(id) => finished_queues.push(id),
                 }
             }
+        }
+        if queues_changed {
+            self.queues_changed();
         }
         if changed {
             self.refresh();
@@ -316,6 +448,12 @@ impl App {
             let options = self.progress.options_for(download.id);
             self.progress.close(download.id);
             self.completion.finished(&download, &options);
+        }
+        for id in finished_queues {
+            let queue = self.queues.borrow().get(&id).cloned();
+            if let Some(queue) = queue {
+                self.completion.queue_finished(&queue);
+            }
         }
     }
 
@@ -349,6 +487,9 @@ impl App {
             ui.set_selected_id(-1);
         }
         ToolbarState::new(selected, table.downloads()).apply(&ui);
+        let target_running = self.running_queues.borrow().contains(&self.target_queue());
+        ui.set_can_start_queue(!target_running);
+        ui.set_can_stop_queue(target_running);
 
         let (shown, total) = (table.visible_count(), table.downloads().len());
         let noun = if total == 1 { "download" } else { "downloads" };
@@ -360,6 +501,7 @@ impl App {
         let total_rate: u64 = table.downloads().iter().map(|d| table.rate_of(d.id)).sum();
         ui.set_status_summary(format::rate(total_rate).into());
         self.progress.update(&table);
+        self.scheduler.update(&self.running_queues.borrow(), &table);
     }
 }
 
@@ -466,6 +608,49 @@ pub mod tests {
                 .borrow_mut()
                 .push(format!("settings {}", settings.max_connections));
         }
+        fn add_queue(&self, name: &str) -> QueueId {
+            self.0.borrow_mut().push(format!("add queue {name}"));
+            QueueId(5)
+        }
+        fn save_queue(&self, queue: Queue) {
+            let ids = |ids: &[DownloadId]| {
+                ids.iter()
+                    .map(|id| id.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let s = &queue.schedule;
+            let days: String = s.days.iter().map(|&d| if d { '1' } else { '0' }).collect();
+            self.0.borrow_mut().push(format!(
+                "save queue {} order={} max={} start={} days={days} shutdown={}",
+                queue.id.0,
+                ids(&queue.downloads),
+                queue.max_concurrent,
+                s.start_at.map(|t| t.to_string()).unwrap_or_default(),
+                s.shutdown_when_done
+            ));
+        }
+        fn delete_queue(&self, id: QueueId) {
+            self.0.borrow_mut().push(format!("delete queue {}", id.0));
+        }
+        fn enqueue(&self, queue: QueueId, downloads: Vec<DownloadId>) {
+            let ids: Vec<String> = downloads.iter().map(|d| d.0.to_string()).collect();
+            self.0
+                .borrow_mut()
+                .push(format!("enqueue {} {}", queue.0, ids.join(",")));
+        }
+        fn dequeue(&self, downloads: Vec<DownloadId>) {
+            let ids: Vec<String> = downloads.iter().map(|d| d.0.to_string()).collect();
+            self.0
+                .borrow_mut()
+                .push(format!("dequeue {}", ids.join(",")));
+        }
+        fn start_queue(&self, id: QueueId) {
+            self.0.borrow_mut().push(format!("start queue {}", id.0));
+        }
+        fn stop_queue(&self, id: QueueId) {
+            self.0.borrow_mut().push(format!("stop queue {}", id.0));
+        }
     }
 
     fn app() -> (AppWindow, Rc<App>, Recorder) {
@@ -554,6 +739,54 @@ pub mod tests {
         assert!(!keys.contains(&"all/Video".to_string()));
         assert_eq!(category_name("unfinished/Music").as_deref(), Some("Music"));
         assert_eq!(category_name("queue/0"), None);
+    }
+
+    #[test]
+    fn queues_reach_the_list_tree_toolbar_and_menu() {
+        let (ui, app, recorder) = app();
+        app.apply([
+            EngineEvent::Added(sample(1, "a.zip", DownloadState::Paused, 0, 1)),
+            EngineEvent::Added(sample(2, "b.zip", DownloadState::Paused, 0, 1)),
+        ]);
+        let mut main = Queue::main();
+        main.downloads = vec![DownloadId(2)];
+        app.apply([
+            EngineEvent::QueueChanged(main),
+            EngineEvent::QueueChanged(Queue::new(QueueId(3), "Night")),
+        ]);
+        let keys: Vec<String> = ui
+            .get_categories()
+            .iter()
+            .map(|r| r.key.to_string())
+            .collect();
+        assert!(keys.contains(&"queue/3".to_string()), "{keys:?}");
+        assert_eq!(ui.get_queue_choices().row_count(), 2);
+        let queued: Vec<String> = ui
+            .get_downloads()
+            .iter()
+            .map(|r| r.queue.to_string())
+            .collect();
+        assert!(queued.contains(&"1".to_string()));
+
+        // The toolbar acts on the queue selected in the tree.
+        ui.set_selected_category("queue/3".into());
+        ui.invoke_category_selected("queue/3".into());
+        assert_eq!(ui.get_downloads().row_count(), 0);
+        assert!(ui.get_can_start_queue() && !ui.get_can_stop_queue());
+        ui.invoke_start_queue();
+        app.apply([EngineEvent::QueueRunning(QueueId(3), true)]);
+        assert!(!ui.get_can_start_queue() && ui.get_can_stop_queue());
+        ui.invoke_stop_queue();
+        ui.invoke_enqueue(1, 3);
+        ui.invoke_dequeue(2);
+        assert_eq!(
+            *recorder.0.borrow(),
+            ["start queue 3", "stop queue 3", "enqueue 3 1", "dequeue 2"]
+        );
+
+        // Deleting the selected queue falls back to All Downloads.
+        app.apply([EngineEvent::QueueRemoved(QueueId(3))]);
+        assert_eq!(ui.get_selected_category(), "all");
     }
 
     #[test]

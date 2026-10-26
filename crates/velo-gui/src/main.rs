@@ -15,6 +15,7 @@ mod list;
 mod options;
 mod progress;
 mod properties;
+mod scheduler;
 #[cfg(test)]
 mod snapshot;
 mod theme;
@@ -61,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = velo_store::load_settings(&dirs.settings())?;
     let store = Store::open(&dirs.database())?;
     let downloads = store.load_downloads()?;
+    let queues = store.load_queues()?;
     let bridge = Bridge::start(BridgeConfig {
         temp_dir: settings
             .temp_dir
@@ -70,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         retry: RetryPolicy::default(),
         store,
         downloads: downloads.clone(),
+        queues,
     })?;
 
     let commands: Rc<dyn Commands> = Rc::new(bridge.engine().clone());
@@ -309,6 +312,24 @@ mod tests {
         category.set_extensions("png jpg webp".into());
         category.set_default_folder("/Users/me/Downloads".into());
         snapshot::save(&window, &category, 480, 180, &dir.join("category.png"));
+        category.hide().unwrap();
+
+        let scheduler = SchedulerWindow::new().unwrap();
+        scheduler.set_queue_names(slint::ModelRc::new(slint::VecModel::from(vec![
+            slint::StandardListViewItem::from("Main download queue  (running)"),
+            slint::StandardListViewItem::from("Night"),
+        ])));
+        scheduler.set_current_queue(1);
+        scheduler.set_name("Night".into());
+        scheduler.set_start_enabled(true);
+        scheduler.set_start_hour(1);
+        scheduler.set_start_minute(30);
+        scheduler.set_days(slint::ModelRc::new(slint::VecModel::from(vec![
+            true, true, true, true, true, false, false,
+        ])));
+        scheduler.set_stop_enabled(true);
+        scheduler.set_stop_hour(6);
+        snapshot::save(&window, &scheduler, 760, 460, &dir.join("scheduler.png"));
     }
 
     /// Six segments of a `total`-byte file in different states, as the planner would leave them.
