@@ -342,6 +342,7 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - "Open with…" in Download complete and the context menu: each OS has its own app chooser and no common way to call it.
 - Joining WebM video and Opus sound (VP9/AV1 in WebM): `velo-mux` joins fragmented MP4 only, so the format picker offers MP4 video with M4A sound; an `ffmpeg` on `PATH` is used if the MP4 joiner can't handle a pair.
 - Joining unfragmented MP4 files (rebuilding `stco`/`co64`): YouTube's streams are fragmented, so it isn't needed yet.
+- Signing and publishing the extensions: the Chrome Web Store, Microsoft Edge Add-ons and Mozilla's add-on site (AMO), so they install without developer mode or a temporary add-on.
 - Solving YouTube's current player script. Since 2025, `base.js` keeps its strings in a table (`aa="…".split(";")`) and flattens its functions into numeric dispatch, so `velo-extract`'s searches can't cut out the signature and n functions; the TV and WEB clients then fail with "player changed" and Velo relies on the clients with direct addresses (Android VR, iOS). The fix is an AST-based solver that runs the whole player in boa, like yt-dlp's EJS solver (Unlicense), with a parser such as meriyah.
 - Saved logins (Options → Site Logins, and Add URL credentials that survive a restart): needs the OS keychain so passwords are never stored in plain text. Until then credentials live in memory only.
 

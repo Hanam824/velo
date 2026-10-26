@@ -97,18 +97,19 @@ fn register_in(host: &NativeHost<'_>, home: &Path, data_dir: &Path) -> Result<Ve
 #[cfg(target_os = "macos")]
 fn manifest_dirs(home: &Path, _data_dir: &Path) -> Vec<(Family, PathBuf)> {
     let support = home.join("Library/Application Support");
+    // Each browser's profile folder, which shows it is installed, and where its hosts go.
     let browsers = [
-        (Family::Chromium, "Google/Chrome"),
-        (Family::Chromium, "Chromium"),
-        (Family::Chromium, "Microsoft Edge"),
-        (Family::Chromium, "BraveSoftware/Brave-Browser"),
-        (Family::Chromium, "Vivaldi"),
-        (Family::Firefox, "Mozilla"),
+        (Family::Chromium, "Google/Chrome", "Google/Chrome"),
+        (Family::Chromium, "Chromium", "Chromium"),
+        (Family::Chromium, "Microsoft Edge", "Microsoft Edge"),
+        (Family::Chromium, "BraveSoftware/Brave-Browser", "BraveSoftware/Brave-Browser"),
+        (Family::Chromium, "Vivaldi", "Vivaldi"),
+        (Family::Firefox, "Firefox", "Mozilla"),
     ];
     browsers
         .into_iter()
-        .filter(|(_, dir)| support.join(dir).is_dir())
-        .map(|(family, dir)| (family, support.join(dir).join("NativeMessagingHosts")))
+        .filter(|(_, profile, _)| support.join(profile).is_dir())
+        .map(|(family, _, hosts)| (family, support.join(hosts).join("NativeMessagingHosts")))
         .collect()
 }
 
@@ -221,13 +222,15 @@ mod tests {
     #[test]
     fn only_installed_browsers_get_a_manifest() {
         let home = tempfile::tempdir().unwrap();
-        let (chrome, firefox) = if cfg!(target_os = "macos") {
+        // Firefox's profile folder, and where its hosts go.
+        let (chrome, firefox, firefox_hosts) = if cfg!(target_os = "macos") {
             (
                 "Library/Application Support/Google/Chrome",
-                "Library/Application Support/Mozilla",
+                "Library/Application Support/Firefox",
+                "Library/Application Support/Mozilla/NativeMessagingHosts",
             )
         } else {
-            (".config/google-chrome", ".mozilla")
+            (".config/google-chrome", ".mozilla", ".mozilla/native-messaging-hosts")
         };
         std::fs::create_dir_all(home.path().join(chrome)).unwrap();
         std::fs::create_dir_all(home.path().join(firefox)).unwrap();
@@ -236,7 +239,7 @@ mod tests {
         let name = format!("{NATIVE_HOST_NAME}.json");
         assert!(written[0].starts_with(home.path().join(chrome)));
         assert!(written[0].ends_with(&name));
-        assert!(written[1].starts_with(home.path().join(firefox)));
+        assert!(written[1].starts_with(home.path().join(firefox_hosts)));
         let text = std::fs::read_to_string(&written[1]).unwrap();
         assert!(text.contains("allowed_extensions"));
         // Registering again overwrites the same files.

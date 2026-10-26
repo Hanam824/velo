@@ -32,6 +32,19 @@ scripts) use the browser APIs.
 2. Open `chrome://extensions`, turn on Developer mode, choose **Load unpacked** and pick
    `extension/dist/chromium`.
 
-The manifest's `key` fixes the extension ID to `knncpmilkobjkfcjafpleodokkhcaing`, the one Velo's
+## Try it in Firefox
+
+1. Install Velo and run it once (it registers `velo-nmh` for Firefox when Firefox has a profile).
+2. Open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on…** and pick
+   `extension/dist/firefox/manifest.json`. A temporary add-on lasts until Firefox restarts; a
+   permanent install needs the add-on signed by Mozilla (in the backlog).
+
+Firefox needs version 128 or later (the ESR). Its manifest uses an event page
+(`background.scripts`) instead of a service worker and names the add-on `velo@hanam824.github.io`,
+the ID Velo's host manifest allows.
+
+## Extension IDs
+
+The Chromium manifest's `key` fixes the extension ID to `knncpmilkobjkfcjafpleodokkhcaing`, the one Velo's
 host manifest allows. The matching private key isn't kept: a store gives a published extension
 its own key.
