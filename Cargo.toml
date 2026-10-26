@@ -22,6 +22,8 @@ velo-store = { path = "crates/velo-store" }
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.23"
+# Runs YouTube's player JavaScript to unscramble stream addresses; pure Rust, no C toolchain.
+boa_engine = "0.22"
 # Local time for the list's dates and the scheduler, the same way on every OS.
 # velo-cli's command line.
 clap = { version = "4", features = ["derive"] }
@@ -39,6 +41,7 @@ proptest = "1"
 # Native file dialogs; on Linux through the XDG desktop portal, so no GTK is needed.
 rfd = "0.17"
 # rustls with the ring provider: the default aws-lc provider carries the OpenSSL license, which deny.toml doesn't allow.
+regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "socks", "system-proxy"] }
 # SQLite compiled in, so every platform has the same version.
 rusqlite = { version = "0.41", features = ["bundled"] }

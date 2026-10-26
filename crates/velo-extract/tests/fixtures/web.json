@@ -1,0 +1,29 @@
+{
+  "playabilityStatus": { "status": "OK" },
+  "videoDetails": {
+    "videoId": "webwebweb01",
+    "title": "Velo web client video",
+    "author": "Velo",
+    "lengthSeconds": "60"
+  },
+  "streamingData": {
+    "formats": [
+      {
+        "itag": 18,
+        "url": "https://media.test/videoplayback?itag=18&n=abcdefghij12&id=webwebweb01",
+        "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+        "width": 640,
+        "height": 360,
+        "contentLength": "1000"
+      }
+    ],
+    "adaptiveFormats": [
+      {
+        "itag": 140,
+        "signatureCipher": "s=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz&sp=sig&url=https%3A%2F%2Fmedia.test%2Fvideoplayback%3Fitag%3D140%26n%3Dzyxwvutsrqpo%26id%3Dwebwebweb01",
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+        "contentLength": "500"
+      }
+    ]
+  }
+}
