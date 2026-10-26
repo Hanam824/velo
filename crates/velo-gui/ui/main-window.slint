@@ -1,6 +1,7 @@
 // The main window: menu bar, toolbar, the Categories pane beside the download list, and the
 // status bar.
 
+import { Button, CheckBox, VerticalBox } from "std-widgets.slint";
 import { AboutPanel } from "about.slint";
 import { CategoriesPane, CategoryItem } from "categories.slint";
 import { DownloadList, DownloadRow } from "download-list.slint";
@@ -62,10 +63,26 @@ export component AppWindow inherits Window {
     callback resume-download(id: int);
     callback stop-download(id: int);
     callback delete-download(id: int);
+    // The user confirmed deleting download `id`, and its finished file too if `delete-file`.
+    callback delete-confirmed(id: int, delete-file: bool);
     callback appearance-changed(appearance: Appearance);
     callback quit();
 
     private property <length> categories-width: 200px;
+    private property <int> pending-delete-id: -1;
+    private property <string> pending-delete-name;
+    private property <bool> pending-delete-complete;
+    private property <bool> pending-delete-file;
+
+    // Asks whether to delete download `id`, named `name`; a `complete` one can take its file
+    // along.
+    public function ask-delete(id: int, name: string, complete: bool) {
+        root.pending-delete-id = id;
+        root.pending-delete-name = name;
+        root.pending-delete-complete = complete;
+        root.pending-delete-file = false;
+        confirm-delete.show();
+    }
 
     title: "Velo Download Manager";
     icon: @image-url("../../../assets/icons/velo.svg");
@@ -158,6 +175,56 @@ export component AppWindow inherits Window {
         AboutPanel {
             version: root.version;
             close => { about.close(); }
+        }
+    }
+
+    confirm-delete := PopupWindow {
+        x: (root.width - 400px) / 2;
+        y: (root.height - 150px) / 2;
+        width: 400px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Theme.window;
+            border-color: Theme.border;
+            border-width: 1px;
+            border-radius: 8px;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000040;
+            VerticalBox {
+                Text {
+                    text: "Delete “" + root.pending-delete-name + "” from the list?";
+                    wrap: word-wrap;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                if !root.pending-delete-complete: Text {
+                    text: "The part of it downloaded so far is deleted too.";
+                    wrap: word-wrap;
+                    color: Theme.text-muted;
+                }
+                CheckBox {
+                    visible: root.pending-delete-complete;
+                    checked <=> root.pending-delete-file;
+                    text: "Also delete the file from disk";
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Button {
+                        text: "Delete";
+                        primary: true;
+                        clicked => {
+                            confirm-delete.close();
+                            root.delete-confirmed(root.pending-delete-id,
+                                root.pending-delete-complete && root.pending-delete-file);
+                        }
+                    }
+                    Button {
+                        text: "Cancel";
+                        clicked => { confirm-delete.close(); }
+                    }
+                }
+            }
         }
     }
 
