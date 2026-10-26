@@ -12,6 +12,7 @@ name = "velo"
 path = "src/main.rs"
 
 [dependencies]
+chrono.workspace = true
 velo-core.workspace = true
 velo-engine.workspace = true
 velo-platform.workspace = true
