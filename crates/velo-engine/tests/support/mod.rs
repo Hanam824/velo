@@ -7,12 +7,19 @@
 //! - `/attachment`: like `/files`, with a UTF-8 `Content-Disposition` file name.
 //! - `/empty.txt`: an empty file.
 //! - `/redirect`: redirects to `/files/redirected.bin`.
+//! - `/slow/{name}`: like `/files`, sent in 8 KiB chunks 2 ms apart, so connections overlap.
+//! - `/flaky/{name}`: like `/slow`, but every other `GET` stops halfway through its range.
+//! - `/fail/{name}`: answers `HEAD` like `/files`, but every `GET` with `503`.
 //! - anything else: `404`.
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::header::{
     ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED,
     LOCATION, RANGE,
@@ -39,6 +46,7 @@ pub fn body() -> Vec<u8> {
 
 /// Starts the server on a free local port and returns its base URL, e.g. `http://127.0.0.1:1234`.
 pub async fn start() -> String {
+    let gets = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route(
             "/files/{name}",
@@ -92,11 +100,62 @@ pub async fn start() -> String {
                     .body(Body::empty())
                     .unwrap()
             }),
+        )
+        .route(
+            "/slow/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                trickle(serve(&method, &headers, &body(), true, &[]), false).await
+            }),
+        )
+        .route(
+            "/flaky/{name}",
+            get(move |method: Method, headers: HeaderMap| {
+                let gets = Arc::clone(&gets);
+                async move {
+                    let response = serve(&method, &headers, &body(), true, &[]);
+                    let cut = method == Method::GET
+                        && gets.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
+                    trickle(response, cut).await
+                }
+            }),
+        )
+        .route(
+            "/fail/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                if method == Method::GET {
+                    return status(StatusCode::SERVICE_UNAVAILABLE);
+                }
+                serve(&method, &headers, &body(), true, &[])
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://{address}")
+}
+
+/// Re-sends `response`'s body in 8 KiB chunks 2 ms apart; with `cut`, the connection fails
+/// halfway through.
+async fn trickle(response: Response<Body>, cut: bool) -> Response<Body> {
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let stop = if cut { bytes.len() / 2 } else { bytes.len() };
+    let chunks = futures_util::stream::unfold(0, move |sent| {
+        let bytes = bytes.clone();
+        async move {
+            if sent >= stop {
+                // After the error the stream ends; `usize::MAX` marks that.
+                return (cut && sent != usize::MAX).then(|| {
+                    let error = std::io::Error::other("connection cut by the test server");
+                    (Err(error), usize::MAX)
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            let next = (sent + 8 * 1024).min(stop);
+            Some((Ok::<Bytes, std::io::Error>(bytes.slice(sent..next)), next))
+        }
+    });
+    Response::from_parts(parts, Body::from_stream(chunks))
 }
 
 /// An empty response with `code`.
