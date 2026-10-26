@@ -67,10 +67,6 @@ impl Default for DownloadTable {
 
 impl DownloadTable {
     /// Adds `download`, or replaces the one with the same id.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "fed by the engine bridge in D13")
-    )]
     pub fn upsert(&mut self, download: Download) {
         if !download.is_running() {
             self.progress.remove(&download.id);
@@ -82,20 +78,12 @@ impl DownloadTable {
     }
 
     /// Removes download `id`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "fed by the engine bridge in D13")
-    )]
     pub fn remove(&mut self, id: DownloadId) {
         self.downloads.retain(|d| d.id != id);
         self.progress.remove(&id);
     }
 
     /// Records live progress for a running download.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "fed by the engine bridge in D13")
-    )]
     pub fn set_progress(&mut self, update: ProgressUpdate) {
         if self.get(update.id).is_some_and(Download::is_running) {
             self.progress.insert(update.id, update);

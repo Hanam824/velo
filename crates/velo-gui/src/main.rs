@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod bridge;
 mod categories;
 mod format;
 mod list;
@@ -12,27 +13,68 @@ mod snapshot;
 mod toolbar;
 
 use std::rc::Rc;
+use std::time::Duration;
 
-use velo_core::Settings;
+use velo_core::{EngineEvent, Settings};
+use velo_engine::Options;
+use velo_platform::AppDirs;
+use velo_store::Store;
 
-use crate::app::App;
+use crate::app::{App, Commands};
+use crate::bridge::{Bridge, BridgeConfig};
 
 slint::include_modules!();
 
-/// Creates the main window and its state.
-fn create_window(settings: &Settings) -> Result<(AppWindow, Rc<App>), slint::PlatformError> {
+/// How often the UI takes in engine events.
+const UI_REFRESH: Duration = Duration::from_millis(250);
+
+/// Creates the main window and its state, sending engine commands to `commands`.
+fn create_window(
+    settings: &Settings,
+    commands: Box<dyn Commands>,
+) -> Result<(AppWindow, Rc<App>), slint::PlatformError> {
     let ui = AppWindow::new()?;
     ui.set_version(env!("CARGO_PKG_VERSION").into());
-    let app = App::new(&ui, settings);
+    let app = App::new(&ui, settings, commands);
     ui.on_quit(|| {
         let _ = slint::quit_event_loop();
     });
     Ok((ui, app))
 }
 
-fn main() -> Result<(), slint::PlatformError> {
-    let (ui, _app) = create_window(&Settings::default())?;
-    ui.run()
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dirs = AppDirs::new()?;
+    let settings = velo_store::load_settings(&dirs.settings())?;
+    let store = Store::open(&dirs.database())?;
+    let downloads = store.load_downloads()?;
+    let bridge = Bridge::start(BridgeConfig {
+        temp_dir: settings
+            .temp_dir
+            .clone()
+            .unwrap_or_else(|| dirs.parts().to_path_buf()),
+        options: Options::from_settings(&settings),
+        store,
+        downloads: downloads.clone(),
+    })?;
+
+    let (ui, app) = create_window(&settings, Box::new(bridge.engine().clone()))?;
+    app.apply(downloads.into_iter().map(EngineEvent::Added));
+    let bridge = Rc::new(bridge);
+    let timer = slint::Timer::default();
+    {
+        let (app, bridge) = (Rc::clone(&app), Rc::clone(&bridge));
+        timer.start(slint::TimerMode::Repeated, UI_REFRESH, move || {
+            app.apply(bridge.drain());
+        });
+    }
+    ui.run()?;
+
+    // Pause what is running and save it before exiting.
+    drop(timer);
+    if let Ok(bridge) = Rc::try_unwrap(bridge) {
+        bridge.shutdown();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -41,12 +83,14 @@ mod tests {
     use velo_core::{DownloadId, DownloadState, EngineEvent, ProgressUpdate};
 
     use super::*;
+    use crate::app::tests::Recorder;
     use crate::list::tests::sample;
 
     #[test]
     fn window_shows_the_version_categories_and_switches_appearance() {
         i_slint_backend_testing::init_no_event_loop();
-        let (ui, _app) = create_window(&Settings::default()).unwrap();
+        let (ui, _app) =
+            create_window(&Settings::default(), Box::new(Recorder::default())).unwrap();
         assert_eq!(ui.get_version(), env!("CARGO_PKG_VERSION"));
         assert_eq!(ui.get_categories().row_data(0).unwrap().key, "all");
         let rows = ui.get_categories().row_count();
@@ -72,7 +116,7 @@ mod tests {
         );
         std::fs::create_dir_all(&dir).unwrap();
         let window = snapshot::init();
-        let (ui, app) = create_window(&Settings::default()).unwrap();
+        let (ui, app) = create_window(&Settings::default(), Box::new(Recorder::default())).unwrap();
         let mb = 1024 * 1024;
         for download in [
             sample(
@@ -106,15 +150,15 @@ mod tests {
                 58 * mb,
             ),
         ] {
-            app.apply(EngineEvent::Added(download));
+            app.apply([EngineEvent::Added(download)]);
         }
-        app.apply(EngineEvent::Progress(ProgressUpdate {
+        app.apply([EngineEvent::Progress(ProgressUpdate {
             id: DownloadId(1),
             downloaded: 2_350 * mb,
             total: Some(6_100 * mb),
             rate: 18 * mb + 400 * 1024,
             segments: Vec::new(),
-        }));
+        })]);
         ui.set_selected_id(2);
         ui.invoke_selection_changed(2);
         for (appearance, name) in [(Appearance::Light, "light"), (Appearance::Dark, "dark")] {
