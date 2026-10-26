@@ -1,0 +1,19 @@
+{
+  "name": "velo-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Velo Download Manager's browser extension: hands downloads and YouTube videos to the app.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/chrome": "0.3.6",
+    "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}
