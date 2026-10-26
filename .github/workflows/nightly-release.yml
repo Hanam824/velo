@@ -58,7 +58,7 @@ jobs:
       version: ${{ needs.version.outputs.version }}
       sha: ${{ needs.version.outputs.sha }}
 
-  # Runs only when every build passed, so the pre-release always has all five archives.
+  # Runs only when every build passed, so the pre-release always has all five archives and their installers.
   publish:
     name: Replace the nightly pre-release
     needs: [version, build]
@@ -71,7 +71,7 @@ jobs:
         with:
           ref: ${{ needs.version.outputs.sha }}
 
-      - name: Download the archives
+      - name: Download the archives and installers
         uses: actions/download-artifact@v8
         with:
           path: dist
