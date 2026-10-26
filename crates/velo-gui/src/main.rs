@@ -10,6 +10,7 @@ mod categories;
 mod config;
 mod format;
 mod list;
+mod progress;
 #[cfg(test)]
 mod snapshot;
 mod toolbar;
@@ -72,6 +73,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dirs.downloads().to_path_buf(),
     ));
     let adder = Adder::new(config, commands, bridge.clone());
+    let shown = Rc::downgrade(&app);
+    adder.on_started(move |id| {
+        if let Some(app) = shown.upgrade() {
+            app.show_progress(id);
+        }
+    });
     ui.on_add_url(move || {
         if let Err(error) = adder.open() {
             eprintln!("velo: couldn't open Add URL: {error}");
@@ -173,7 +180,7 @@ mod tests {
             downloaded: 2_350 * mb,
             total: Some(6_100 * mb),
             rate: 18 * mb + 400 * 1024,
-            segments: Vec::new(),
+            segments: sample_segments(6_100 * mb),
         })]);
         ui.set_selected_id(2);
         ui.invoke_selection_changed(2);
@@ -212,5 +219,31 @@ mod tests {
         info.set_kind(FileKind::Program);
         info.set_probing(false);
         snapshot::save(&window, &info, 600, 260, &dir.join("download-info.png"));
+        info.hide().unwrap();
+
+        app.show_progress(DownloadId(1));
+        let progress = app.progress_window(DownloadId(1)).unwrap();
+        snapshot::save(&window, &progress, 560, 520, &dir.join("progress.png"));
+    }
+
+    /// Six segments of a `total`-byte file in different states, as the planner would leave them.
+    fn sample_segments(total: u64) -> Vec<velo_core::Segment> {
+        use velo_core::{Segment, SegmentId, SegmentState};
+        let bounds = [0.0, 0.25, 0.5, 0.62, 0.75, 0.87, 1.0];
+        let done = [1.0, 0.7, 0.55, 0.4, 0.2, 0.0];
+        (0..6)
+            .map(|i| {
+                let start = (bounds[i] * total as f64) as u64;
+                let end = (bounds[i + 1] * total as f64) as u64;
+                let mut segment = Segment::new(SegmentId(i as u32), start, end);
+                segment.downloaded = ((end - start) as f64 * done[i]) as u64;
+                segment.state = if done[i] == 1.0 {
+                    SegmentState::Done
+                } else {
+                    SegmentState::Active
+                };
+                segment
+            })
+            .collect()
     }
 }

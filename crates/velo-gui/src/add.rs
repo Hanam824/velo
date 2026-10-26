@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
+use velo_core::DownloadId;
 use velo_engine::{Credentials, NewDownload, Probe, RequestOptions, Url, unique_file_name};
 
 use crate::app::Commands;
@@ -33,6 +34,9 @@ pub fn is_download_url(text: &str) -> bool {
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
 }
 
+/// What runs with a download started from Download File Info.
+type OnStarted = Box<dyn Fn(DownloadId)>;
+
 /// Opens the add dialogs and turns what the user chose into engine downloads.
 pub struct Adder {
     config: Rc<Config>,
@@ -44,6 +48,8 @@ pub struct Adder {
     infos: RefCell<BTreeMap<u64, DownloadInfoDialog>>,
     /// The number for the next Download File Info dialog.
     next_info: Cell<u64>,
+    /// Runs with each download started from Download File Info, to show its progress.
+    on_started: RefCell<Option<OnStarted>>,
 }
 
 /// What a Download File Info dialog knows besides its fields.
@@ -66,7 +72,13 @@ impl Adder {
             add_url: RefCell::default(),
             infos: RefCell::default(),
             next_info: Cell::new(0),
+            on_started: RefCell::default(),
         })
+    }
+
+    /// Calls `f` with each download started at once from Download File Info.
+    pub fn on_started(&self, f: impl Fn(DownloadId) + 'static) {
+        *self.on_started.borrow_mut() = Some(Box::new(f));
     }
 
     /// Shows the Add URL dialog, or brings it forward if it is already open.
@@ -221,7 +233,7 @@ impl Adder {
             self.config.remember_dir(category, &save_dir);
         }
         self.config.update(|s| s.remember_url(&pending.url));
-        self.commands.add(NewDownload {
+        let id = self.commands.add(NewDownload {
             url: pending.url.clone(),
             file_name,
             save_dir,
@@ -233,6 +245,9 @@ impl Adder {
                 ..RequestOptions::default()
             },
         });
+        if start && let Some(on_started) = self.on_started.borrow().as_ref() {
+            on_started(id);
+        }
     }
 
     /// Hides Download File Info dialog `number` and forgets it.
