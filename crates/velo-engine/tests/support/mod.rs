@@ -25,12 +25,14 @@
 //!   [`COOKIES`]; `403` otherwise.
 //! - `/capped/{name}`: like `/files`, but answers `403` to a range longer than [`CAP`] bytes,
 //!   as YouTube does.
+//! - `/blob/{name}`: like `/files`, with the bytes given to [`put_blob`] for `name`.
 //! - anything else: `404`.
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use axum::Router;
@@ -69,6 +71,14 @@ pub fn body() -> Vec<u8> {
     (0..SIZE as u64)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
         .collect()
+}
+
+/// The files `/blob` serves, by name.
+static BLOBS: LazyLock<Mutex<HashMap<String, Vec<u8>>>> = LazyLock::new(Mutex::default);
+
+/// Makes `/blob/{name}` serve `bytes`, on every test server of this process.
+pub fn put_blob(name: &str, bytes: Vec<u8>) {
+    BLOBS.lock().unwrap().insert(name.to_string(), bytes);
 }
 
 /// The longest range `/capped` serves.
@@ -123,6 +133,20 @@ pub async fn start() -> String {
     let version = Arc::new(AtomicUsize::new(0));
     let bump = Arc::clone(&version);
     let app = Router::new()
+        .route(
+            "/blob/{name}",
+            get(
+                |axum::extract::Path(name): axum::extract::Path<String>,
+                 method: Method,
+                 headers: HeaderMap| async move {
+                    let bytes = BLOBS.lock().unwrap().get(&name).cloned();
+                    match bytes {
+                        Some(bytes) => serve(&method, &headers, &bytes, true, &[]),
+                        None => status(StatusCode::NOT_FOUND),
+                    }
+                },
+            ),
+        )
         .route(
             "/capped/{name}",
             get(|method: Method, headers: HeaderMap| async move {

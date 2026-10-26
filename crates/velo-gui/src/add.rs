@@ -9,7 +9,7 @@ use std::rc::Rc;
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
 use velo_core::{DownloadId, QueueId, Settings, Source};
 use velo_engine::{Credentials, NewDownload, Probe, RequestOptions, Url, unique_file_name};
-use velo_extract::{Format, StreamKind, Video};
+use velo_extract::{Choice, Video};
 
 use crate::app::Commands;
 use crate::config::Config;
@@ -89,9 +89,9 @@ struct Pending {
     path_edited: bool,
     /// The folder and name asked for from outside the app.
     preset: Preset,
-    /// For a YouTube address: the video, and the itags of the formats offered, in order.
-    video: Option<(Video, Vec<u32>)>,
-    /// The index of the chosen format in `video`'s itags.
+    /// For a YouTube address: the video, and the itags of each choice offered, in order.
+    video: Option<(Video, Vec<Vec<u32>>)>,
+    /// The index of the chosen choice in `video`'s.
     format_index: usize,
 }
 
@@ -338,8 +338,8 @@ impl Adder {
         );
     }
 
-    /// Adds format `itag` (or the best video with sound) of the video in `result` without
-    /// asking; a video that can't be had is reported.
+    /// Adds format `itag` (or the best choice) of the video in `result` without asking; a
+    /// video that can't be had is reported.
     fn add_video(&self, result: VideoResult, preset: Preset, start: bool, itag: Option<u32>) {
         let video = match result {
             Ok(video) => video,
@@ -348,25 +348,25 @@ impl Adder {
                 return;
             }
         };
-        let format = match itag {
-            Some(itag) => video.format(itag),
+        let choice = match itag {
+            Some(itag) => video.choice(&[itag]),
             None => video.choices().first().copied(),
         };
-        let Some(format) = format.filter(|f| f.url.is_some()) else {
+        let Some(choice) = choice else {
             eprintln!("velo: YouTube doesn't offer that format of {}", video.id);
             return;
         };
         let name = preset
             .file_name
             .clone()
-            .unwrap_or_else(|| video.file_name(format));
+            .unwrap_or_else(|| video.file_name(&choice));
         let category = self.config.category_for(&name);
         let save_dir = preset
             .save_dir
             .clone()
             .unwrap_or_else(|| self.config.save_dir(category.as_deref()));
         let id = self.commands.add(NewDownload {
-            url: format.url.clone().unwrap_or_default(),
+            url: choice.formats()[0].url.clone().unwrap_or_default(),
             file_name: name,
             save_dir,
             category,
@@ -375,7 +375,7 @@ impl Adder {
             request: RequestOptions::default(),
             source: Some(Source::YouTube {
                 video_id: video.id.clone(),
-                itags: vec![format.itag],
+                itags: choice.itags(),
             }),
         });
         if !start {
@@ -424,13 +424,13 @@ impl Adder {
             self.config.remember_dir(category, &save_dir);
         }
         self.config.update(|s| s.remember_url(&pending.url));
-        // A video downloads the chosen stream, whose address is worked out again each start.
-        let (url, source) = match pending.chosen_format() {
-            Some((video, format)) => (
-                format.url.clone().unwrap_or_default(),
+        // A video downloads the chosen streams, whose addresses are worked out again each start.
+        let (url, source) = match pending.chosen() {
+            Some((video, choice)) => (
+                choice.formats()[0].url.clone().unwrap_or_default(),
                 Some(Source::YouTube {
                     video_id: video.id.clone(),
-                    itags: vec![format.itag],
+                    itags: choice.itags(),
                 }),
             ),
             None => (pending.url.clone(), None),
@@ -478,11 +478,10 @@ impl Pending {
             .unwrap_or(&self.server_name)
     }
 
-    /// The video and the format chosen of it, for a YouTube address.
-    fn chosen_format(&self) -> Option<(&Video, &Format)> {
-        let (video, itags) = self.video.as_ref()?;
-        let itag = itags.get(self.format_index)?;
-        Some((video, video.format(*itag)?))
+    /// The video and the choice made of it, for a YouTube address.
+    fn chosen(&self) -> Option<(&Video, Choice<'_>)> {
+        let (video, choices) = self.video.as_ref()?;
+        Some((video, video.choice(choices.get(self.format_index)?)?))
     }
 }
 
@@ -520,8 +519,8 @@ fn video_found(
         return dialog
             .set_error("YouTube offers no format of this video that Velo can download.".into());
     }
-    let labels: Vec<SharedString> = choices.iter().map(|f| format_label(f).into()).collect();
-    let itags = choices.iter().map(|f| f.itag).collect();
+    let labels: Vec<SharedString> = choices.iter().map(|c| choice_label(c).into()).collect();
+    let itags = choices.iter().map(Choice::itags).collect();
     dialog.set_formats(ModelRc::new(VecModel::from(labels)));
     dialog.set_format_index(0);
     if dialog.get_description().is_empty() {
@@ -534,36 +533,40 @@ fn video_found(
 /// Shows format `index` of the video: its name, size, type and folder.
 fn show_format(dialog: &DownloadInfoDialog, config: &Config, pending: &mut Pending, index: i32) {
     pending.format_index = usize::try_from(index).unwrap_or(0);
-    let Some((video, format)) = pending.chosen_format() else {
+    let Some((video, choice)) = pending.chosen() else {
         return;
     };
-    let (name, size) = (video.file_name(format), format.content_length);
+    let (name, size) = (video.file_name(&choice), choice.size());
     pending.server_name = name;
     show_file(dialog, config, pending, size);
 }
 
-/// How a format is listed: `720p MP4, video with sound, 24.31 MB` or
-/// `Sound only, M4A 128 kbps, 3.27 MB`.
-fn format_label(format: &Format) -> String {
-    let size = format
-        .content_length
+/// How a choice is listed: `1080p MP4, video and sound joined, 95.21 MB`,
+/// `360p MP4, video with sound, 12.70 MB` or `Sound only, M4A 128 kbps, 3.27 MB`.
+fn choice_label(choice: &Choice<'_>) -> String {
+    let size = choice
+        .size()
         .map(|n| format!(", {}", format::size(n)))
         .unwrap_or_default();
-    let extension = format.extension().to_uppercase();
-    match format.kind {
-        StreamKind::Audio => {
-            let kbps = format.bitrate.unwrap_or_default() / 1000;
-            format!("Sound only, {extension} {kbps} kbps{size}")
-        }
-        _ => {
-            let quality = format
-                .quality_label
-                .clone()
-                .or_else(|| format.height.map(|h| format!("{h}p")))
-                .unwrap_or_else(|| format!("itag {}", format.itag));
-            format!("{quality} {extension}, video with sound{size}")
-        }
+    let extension = choice.extension().to_uppercase();
+    let first = choice.formats()[0];
+    if choice.is_audio_only() {
+        let kbps = first.bitrate.unwrap_or_default() / 1000;
+        return format!("Sound only, {extension} {kbps} kbps{size}");
     }
+    let quality = first
+        .quality_label
+        .clone()
+        .or_else(|| first.height.map(|h| format!("{h}p")))
+        .unwrap_or_else(|| format!("itag {}", first.itag));
+    let how = match choice {
+        Choice::Joined { video, .. } if !video.codecs.iter().any(|c| c.starts_with("avc1")) => {
+            "video and sound joined, not H.264"
+        }
+        Choice::Joined { .. } => "video and sound joined",
+        Choice::Single(_) => "video with sound",
+    };
+    format!("{quality} {extension}, {how}{size}")
 }
 
 /// Shows the file the dialog is about: its category, type, size (`None` if unknown) and save
@@ -618,6 +621,8 @@ fn split_path(path: &str) -> (PathBuf, String) {
 #[cfg(test)]
 pub mod tests {
     use velo_core::Settings;
+
+    use velo_extract::{Format, StreamKind};
 
     use super::*;
     use crate::app::tests::Recorder;
@@ -677,6 +682,10 @@ pub mod tests {
             formats: vec![
                 format(18, StreamKind::Muxed, "video/mp4", Some(360)),
                 format(22, StreamKind::Muxed, "video/mp4", Some(720)),
+                Format {
+                    codecs: vec!["avc1.640028".into()],
+                    ..format(137, StreamKind::Video, "video/mp4", Some(1080))
+                },
                 format(140, StreamKind::Audio, "audio/mp4", None),
             ],
             client: "ios",
@@ -707,6 +716,7 @@ pub mod tests {
         assert_eq!(
             labels,
             [
+                "1080p MP4, video and sound joined, 264.17 MB",
                 "720p MP4, video with sound, 20.98 MB",
                 "360p MP4, video with sound, 17.17 MB",
                 "Sound only, M4A 128 kbps, 133.51 MB",
@@ -722,8 +732,8 @@ pub mod tests {
         );
         assert_eq!(info.get_kind(), crate::FileKind::Video);
 
-        info.set_format_index(2);
-        info.invoke_format_changed(2);
+        info.set_format_index(3);
+        info.invoke_format_changed(3);
         assert_eq!(
             info.get_save_path(),
             dir.path()
@@ -764,7 +774,7 @@ pub mod tests {
             "an unknown format adds nothing: {commands:?}"
         );
         assert!(
-            commands[0].ends_with("youtube=dQw4w9WgXcQ:[22]"),
+            commands[0].ends_with("youtube=dQw4w9WgXcQ:[137, 140]"),
             "{}",
             commands[0]
         );

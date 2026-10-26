@@ -26,14 +26,15 @@ use velo_core::Settings;
 
 use crate::{Error, Limiter, Options, Progress, RequestOptions, Result, client_with};
 
-/// Gives `download` its current address from its source, if it has one.
+/// Gives `download` its current address from its source, if it has one, and returns the
+/// addresses of all its streams (none for a plain download).
 async fn refresh(
     download: &mut Download,
     resolver: Option<&dyn Resolver>,
     cancel: &CancellationToken,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let Some(source) = download.source.clone() else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let resolver =
         resolver.ok_or_else(|| Error::Resolve("this download needs YouTube support".into()))?;
@@ -42,10 +43,10 @@ async fn refresh(
     })
     .await?;
     download.url = urls
-        .into_iter()
-        .next()
+        .first()
+        .cloned()
         .ok_or_else(|| Error::Resolve("no address".into()))?;
-    Ok(())
+    Ok(urls)
 }
 
 /// How often running downloads report [`EngineEvent::Progress`].
@@ -610,8 +611,8 @@ impl Actor {
                 cancel: &cancel,
             };
             let result = match refresh(&mut download, resolver.as_deref(), &cancel).await {
-                Ok(()) => {
-                    run(&context, &mut download, |stage, d| {
+                Ok(streams) => {
+                    run(&context, &mut download, &streams, |stage, d| {
                         let _ = tx.send(TaskMessage::Stage(stage, d.clone()));
                     })
                     .await

@@ -47,7 +47,7 @@ pub async fn merge(
 }
 
 /// Path the parts are joined into before the rename: `<save_path>.velo-tmp`.
-fn temp_path(save_path: &Path) -> PathBuf {
+pub(crate) fn temp_path(save_path: &Path) -> PathBuf {
     let mut name = save_path.file_name().unwrap_or_default().to_os_string();
     name.push(".velo-tmp");
     save_path.with_file_name(name)
