@@ -8,8 +8,9 @@ use tokio_util::sync::CancellationToken;
 use velo_core::{Download, DownloadId, Segment, SegmentId, SegmentState};
 
 use crate::fetch::cancellable;
+use crate::merge::temp_path;
 use crate::{
-    Options, Progress, Result, download_segments, fetch_range, merge, planner, probe,
+    Error, Options, Progress, Result, download_segments, fetch_range, merge, planner, probe,
     unique_file_name,
 };
 
@@ -38,7 +39,7 @@ pub async fn download_file(
         cancel: &CancellationToken::new(),
     };
     let mut download = Download::new(id, url, "", save_dir);
-    run(&context, &mut download, |_, _| {}).await
+    run(&context, &mut download, &[], |_, _| {}).await
 }
 
 /// What one run of a download needs besides the download itself.
@@ -71,19 +72,76 @@ pub(crate) enum Stage {
 /// server when empty, and made unique at the merge) and its segments. If the server's size,
 /// `ETag`, `Last-Modified` or range support changed since the segments were saved, the old part
 /// files are deleted and the download starts over, so parts of two versions are never joined.
+///
+/// With two `streams` (the addresses of a video and its sound), each is downloaded and merged
+/// into `<temp>/<id>/stream-<n>` in turn, its parts in `<temp>/<id>/s<n>/` and its segments in
+/// `download` while it runs; a stream already merged is kept, so a resume picks up at the
+/// stream it stopped in. Then the two are joined into the save path. With fewer, `download.url`
+/// is downloaded as one file.
 pub(crate) async fn run(
     context: &RunContext<'_>,
     download: &mut Download,
+    streams: &[String],
     mut on_stage: impl FnMut(Stage, &Download),
 ) -> Result<PathBuf> {
-    let probe = cancellable(context.cancel, probe(context.client, &download.url)).await?;
     let dir = context.temp_dir.join(download.id.0.to_string());
+    if streams.len() < 2 {
+        let total = fetch(context, download, &dir, &mut on_stage).await?;
+        on_stage(Stage::Merging, download);
+        let save_path = claim_save_path(download).await?;
+        merge(&dir, &download.segments, total, &save_path).await?;
+        return Ok(save_path);
+    }
+
+    let mut files = Vec::new();
+    for (index, url) in streams.iter().enumerate() {
+        let file = dir.join(format!("stream-{index}"));
+        if !fs::try_exists(&file).await? {
+            download.url.clone_from(url);
+            let parts = dir.join(format!("s{index}"));
+            let total = fetch(context, download, &parts, &mut on_stage).await?;
+            merge(&parts, &download.segments, total, &file).await?;
+            // The next stream starts with nothing of its own.
+            download.segments.clear();
+            download.total_size = None;
+            download.etag = None;
+            download.last_modified = None;
+        }
+        files.push(file);
+    }
+    download.url.clone_from(&streams[0]);
+    on_stage(Stage::Merging, download);
+    let save_path = claim_save_path(download).await?;
+    let joining = temp_path(&save_path);
+    let (video, audio, out) = (files[0].clone(), files[1].clone(), joining.clone());
+    let joined = tokio::task::spawn_blocking(move || velo_mux::mux(&video, &audio, &out))
+        .await
+        .map_err(|e| Error::Join(e.to_string()))?;
+    if let Err(error) = joined {
+        let _ = fs::remove_file(&joining).await;
+        return Err(Error::Join(error.to_string()));
+    }
+    fs::rename(&joining, &save_path).await?;
+    download.total_size = Some(fs::metadata(&save_path).await?.len());
+    remove_dir(&dir).await?;
+    Ok(save_path)
+}
+
+/// Downloads `download.url` into part files in `dir`: probes the server, starts over if the
+/// file changed, and fetches what is missing. Returns the size from the server.
+async fn fetch(
+    context: &RunContext<'_>,
+    download: &mut Download,
+    dir: &Path,
+    on_stage: &mut impl FnMut(Stage, &Download),
+) -> Result<Option<u64>> {
+    let probe = cancellable(context.cancel, probe(context.client, &download.url)).await?;
     let changed = download.total_size != probe.total_size
         || download.resumable != probe.resumable
         || download.etag != probe.etag
         || download.last_modified != probe.last_modified;
     if (changed && !download.segments.is_empty()) || !probe.resumable {
-        remove_dir(&dir).await?;
+        remove_dir(dir).await?;
         download.segments.clear();
     }
     download.total_size = probe.total_size;
@@ -103,7 +161,7 @@ pub(crate) async fn run(
         download_segments(
             context.client,
             &probe.url,
-            &dir,
+            dir,
             context.progress,
             context.options,
             context.cancel,
@@ -138,13 +196,15 @@ pub(crate) async fn run(
     };
     download.segments = context.progress.snapshot();
     result?;
+    Ok(probe.total_size)
+}
 
-    on_stage(Stage::Merging, download);
+/// Creates the save folder and gives `download` a file name that is free there; returns the
+/// save path.
+async fn claim_save_path(download: &mut Download) -> Result<PathBuf> {
     fs::create_dir_all(&download.save_dir).await?;
     download.file_name = unique_file_name(&download.save_dir, &download.file_name);
-    let save_path = download.save_path();
-    merge(&dir, &download.segments, probe.total_size, &save_path).await?;
-    Ok(save_path)
+    Ok(download.save_path())
 }
 
 /// Deletes `dir` and everything in it; a missing folder is fine.
