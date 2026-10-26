@@ -5851,6 +5851,7 @@ dependencies = [
 name = "velo-platform"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "etcetera",
  "notify-rust",
  "opener",

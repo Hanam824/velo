@@ -283,6 +283,36 @@ impl Adder {
         );
     }
 
+    /// Adds `urls` to the end of the main queue without asking, each into `save_dir` or else
+    /// the folder of the category its address names, and starts the queue with `start`.
+    pub fn add_many(&self, urls: &[String], save_dir: Option<&Path>, start: bool) {
+        let ids = urls
+            .iter()
+            .map(|url| {
+                let name = Url::parse(url)
+                    .map(|url| velo_engine::file_name(None, &url))
+                    .unwrap_or_default();
+                let category = self.config.category_for(&name);
+                let save_dir = save_dir
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| self.config.save_dir(category.as_deref()));
+                self.commands.add(NewDownload {
+                    url: url.clone(),
+                    file_name: String::new(),
+                    save_dir,
+                    category,
+                    description: String::new(),
+                    start: false,
+                    request: RequestOptions::default(),
+                })
+            })
+            .collect();
+        self.commands.enqueue(QueueId::MAIN, ids);
+        if start {
+            self.commands.start_queue(QueueId::MAIN);
+        }
+    }
+
     /// Adds the download the dialog describes and saves the choices worth remembering.
     fn add(&self, dialog: &DownloadInfoDialog, pending: &Pending, start: bool) {
         let (save_dir, file_name) = split_path(&dialog.get_save_path());
@@ -402,14 +432,14 @@ fn split_path(path: &str) -> (PathBuf, String) {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use velo_core::Settings;
 
     use super::*;
     use crate::app::tests::Recorder;
 
-    /// Answers every probe at once with `answer`.
-    struct FixedProber(ProbeResult);
+    /// Answers every probe at once with its result.
+    pub struct FixedProber(pub ProbeResult);
 
     impl Prober for FixedProber {
         fn probe(&self, _: String, _: Settings, _: Option<Credentials>, done: ProbeDone) {

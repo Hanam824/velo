@@ -1,0 +1,153 @@
+// Adding a batch download: one address with a * that runs through numbers or letters.
+
+import { Button, CheckBox, ComboBox, GridBox, LineEdit, SpinBox, StandardListView, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component BatchWindow inherits Window {
+    // The address, with a * where the numbers or letters go.
+    in-out property <string> pattern;
+    // 0 numbers, 1 letters.
+    in-out property <int> kind;
+    in-out property <string> from: "1";
+    in-out property <string> to: "10";
+    // The fewest digits a number has, padded with zeros.
+    in-out property <int> digits: 1;
+    in-out property <string> folder;
+    in property <string> default-folder;
+    in-out property <bool> start;
+    // The first addresses the batch makes, and how many there are in all.
+    in property <[StandardListViewItem]> preview;
+    in property <int> count;
+    in property <string> error;
+
+    // Any field changed: work out the preview again.
+    callback edited();
+    callback browse();
+    callback accepted();
+    callback cancelled();
+
+    title: "Add Batch Download";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 560px;
+    preferred-height: 460px;
+    min-width: 440px;
+    min-height: 380px;
+    background: Theme.window;
+
+    VerticalBox {
+        Text {
+            text: "Put a * in the address where the numbers or letters go, such as https://example.com/photo*.jpg.";
+            wrap: word-wrap;
+            color: Theme.text-muted;
+        }
+        GridBox {
+            padding: 0;
+            Row {
+                Text {
+                    text: "Address:";
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                LineEdit {
+                    colspan: 3;
+                    horizontal-stretch: 1;
+                    text <=> root.pattern;
+                    placeholder-text: "https://example.com/file*.zip";
+                    edited => { root.edited(); }
+                }
+            }
+            Row {
+                Text {
+                    text: "Replace * with:";
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                ComboBox {
+                    model: ["Numbers", "Letters"];
+                    current-index <=> root.kind;
+                    selected => { root.edited(); }
+                }
+                Text {
+                    text: "Digits:";
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    color: root.kind == 0 ? Theme.text : Theme.text-disabled;
+                }
+                SpinBox {
+                    minimum: 1;
+                    maximum: 12;
+                    enabled: root.kind == 0;
+                    value <=> root.digits;
+                    edited => { root.edited(); }
+                }
+            }
+            Row {
+                Text {
+                    text: "From:";
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                LineEdit {
+                    text <=> root.from;
+                    edited => { root.edited(); }
+                }
+                Text {
+                    text: "To:";
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    color: Theme.text;
+                }
+                LineEdit {
+                    text <=> root.to;
+                    edited => { root.edited(); }
+                }
+            }
+            Row {
+                Text {
+                    text: "Save to:";
+                    vertical-alignment: center;
+                    color: Theme.text;
+                }
+                HorizontalLayout {
+                    colspan: 3;
+                    spacing: 4px;
+                    LineEdit {
+                        text <=> root.folder;
+                        placeholder-text: root.default-folder;
+                    }
+                    Button {
+                        text: "…";
+                        clicked => { root.browse(); }
+                    }
+                }
+            }
+        }
+        Text {
+            text: root.error != "" ? root.error : root.count == 1 ? "1 file" : root.count + " files";
+            color: root.error != "" ? Theme.danger : Theme.text-muted;
+        }
+        StandardListView {
+            vertical-stretch: 1;
+            model: root.preview;
+        }
+        CheckBox {
+            text: "Start the main queue now";
+            checked <=> root.start;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "Add to Main Queue";
+                primary: true;
+                enabled: root.error == "" && root.count > 0;
+                clicked => { root.accepted(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancelled(); }
+            }
+        }
+    }
+}
