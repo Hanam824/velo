@@ -1,8 +1,8 @@
 name: Build release archives
 
-# Builds and tests one commit natively on every release platform and uploads an archive per
-# platform (artifacts `velo-<platform>`). Called by release.yml and nightly-release.yml, which
-# then publish the archives.
+# Builds and tests one commit natively on every release platform and uploads an archive and the
+# installers per platform (artifacts `velo-<platform>`), after installing them once to check they
+# work. Called by release.yml and nightly-release.yml, which then publish them.
 on:
   workflow_call:
     inputs:
@@ -12,6 +12,14 @@ on:
         type: string
       sha:
         description: "Commit to build"
+        required: true
+        type: string
+  # By hand (Actions → Build release archives → Run workflow), to try the packaging on a branch
+  # without publishing anything.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version written into the build and the archive names, e.g. v0.2.0"
         required: true
         type: string
 
@@ -44,7 +52,8 @@ jobs:
       - name: Check out the release commit
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.sha }}
+          # A dispatch has no sha input and builds the branch it runs on.
+          ref: ${{ inputs.sha || github.sha }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,20 +69,33 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev
 
+      - name: Install cargo-packager
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-packager@0.11.8
+
       - name: Test
         run: cargo test --workspace --locked
 
-      - name: Build and archive the release
-        id: package
+      - name: Build the archive and the installers
         env:
           VERSION: ${{ inputs.version }}
-        run: |
-          archive="$(./scripts/package-release.sh "$VERSION" | tail -n 1)"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+        run: ./scripts/package-release.sh "$VERSION" --installers
 
-      - name: Upload the archive
+      - name: Install and run the installed app's CLI
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./scripts/smoke-install.sh "$VERSION"
+
+      - name: Upload the archive and the installers
         uses: actions/upload-artifact@v7
         with:
           name: velo-${{ matrix.name }}
-          path: ${{ steps.package.outputs.archive }}
+          path: |
+            dist/velo-*.tar.gz
+            dist/velo-*.zip
+            dist/velo-*.dmg
+            dist/velo-*.exe
+            dist/velo-*.deb
+            dist/velo-*.AppImage
           if-no-files-found: error

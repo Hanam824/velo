@@ -34,3 +34,36 @@ slint-build.workspace = true
 
 [lints]
 workspace = true
+
+# Installers, built by `cargo packager -p velo-gui --release` (scripts/package-release.sh).
+[package.metadata.packager]
+product-name = "Velo Download Manager"
+identifier = "io.github.hanam824.velo"
+description = "A segmented download manager"
+homepage = "https://github.com/Hanam824/velo"
+authors = ["Velo contributors"]
+publisher = "Velo contributors"
+category = "Utility"
+icons = [
+    "../../packaging/icons/velo-32.png",
+    "../../packaging/icons/velo-128.png",
+    "../../packaging/icons/velo-256.png",
+    "../../packaging/icons/velo-512.png",
+    "../../packaging/icons/velo-512@2x.png",
+]
+binaries = [{ path = "velo", main = true }, { path = "velo-cli", main = false }]
+out-dir = "../../dist/installers"
+# The release binaries come from package-release.sh, which builds both before packaging.
+before-packaging-command = "cargo build --release -p velo-gui -p velo-cli"
+
+[package.metadata.packager.macos]
+minimum-system-version = "15.0"
+
+[package.metadata.packager.deb]
+section = "net"
+# The Slint window's libraries; the rest is in glibc.
+depends = ["libfontconfig1", "libxkbcommon0"]
+
+[package.metadata.packager.nsis]
+# Per user, so installing needs no administrator rights.
+installer-mode = "currentUser"

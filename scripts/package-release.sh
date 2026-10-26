@@ -5,21 +5,29 @@
 #     -> dist/velo-v0.1.0-macos-arm64.tar.gz      (macOS, Linux: .tar.gz)
 #     -> dist/velo-v0.1.0-windows-x86_64.zip      (Windows, from Git Bash: .zip)
 #   ./scripts/package-release.sh v0.1.1-nightly.20261021   (a nightly build's version)
+#   ./scripts/package-release.sh v0.1.0 --installers
+#     also -> dist/velo-v0.1.0-macos-arm64.dmg        (macOS)
+#             dist/velo-v0.1.0-windows-x86_64.exe     (Windows: NSIS installer, per user)
+#             dist/velo-v0.1.0-linux-x86_64.deb       (Linux)
+#             dist/velo-v0.1.0-linux-x86_64.AppImage  (Linux)
 #
 # The archive holds the Velo desktop app (`velo`), the `velo-cli` command-line tool, README.md and
-# LICENSE.
-# Builds are native only: each platform is built on a machine of that platform. The last line of
-# stdout is the archive path. The release version is written into Cargo.toml for the build (so
+# LICENSE. The installers are made by cargo-packager (`cargo install cargo-packager --locked`)
+# from [package.metadata.packager] in crates/velo-gui/Cargo.toml, and are unsigned.
+# Builds are native only: each platform is built on a machine of that platform. Stdout lists the
+# files made, one per line, the archive first. The release version is written into Cargo.toml for the build (so
 # `velo-cli --version` matches the tag) and Cargo.toml and Cargo.lock are restored afterwards.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 version="${1:-}"
+installers=false
+if [ "${2:-}" = --installers ]; then installers=true; fi
 case "$version" in
     v[0-9]*.[0-9]*.[0-9]*) ;;
     *)
-        echo "usage: $0 <version tag, e.g. v0.1.0>" >&2
+        echo "usage: $0 <version tag, e.g. v0.1.0> [--installers]" >&2
         exit 2
         ;;
 esac
@@ -75,11 +83,36 @@ for bin in velo velo-cli; do
 done
 cp README.md LICENSE "dist/$name/"
 
-cd dist
-if [ "$os" = windows ]; then
-    powershell -NoProfile -Command "Compress-Archive -Path '$name' -DestinationPath '$name.zip'"
-    echo "dist/$name.zip"
-else
-    tar -czf "$name.tar.gz" "$name"
-    echo "dist/$name.tar.gz"
+(
+    cd dist
+    if [ "$os" = windows ]; then
+        powershell -NoProfile -Command "Compress-Archive -Path '$name' -DestinationPath '$name.zip'"
+        echo "dist/$name.zip"
+    else
+        tar -czf "$name.tar.gz" "$name"
+        echo "dist/$name.tar.gz"
+    fi
+)
+
+if [ "$installers" = true ]; then
+    case "$os" in
+        macos) formats=dmg ;;
+        windows) formats=nsis ;;
+        linux) formats=deb,appimage ;;
+    esac
+    rm -rf dist/installers
+    # AppImage tools are themselves AppImages; this runs them without FUSE (CI has none).
+    APPIMAGE_EXTRACT_AND_RUN=1 cargo packager -p velo-gui --release --formats "$formats" >&2
+    # cargo-packager names files after the product; give them the archive's name.
+    for file in dist/installers/*; do
+        case "$file" in
+            *.dmg) ext=dmg ;;
+            *.exe) ext=exe ;;
+            *.deb) ext=deb ;;
+            *.AppImage) ext=AppImage ;;
+            *) continue ;;
+        esac
+        mv "$file" "dist/$name.$ext"
+        echo "dist/$name.$ext"
+    done
 fi
