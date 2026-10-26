@@ -28,6 +28,7 @@ case "$(uname -s)" in
         sudo apt-get install -y "./$(ls dist/velo-"$version"-linux-*.deb)"
         check velo-cli
         test -x /usr/bin/velo
+        test -x /usr/bin/velo-nmh
         ;;
     Darwin)
         mount="$(mktemp -d)"
@@ -36,6 +37,7 @@ case "$(uname -s)" in
         app="$mount/Velo Download Manager.app"
         check "$app/Contents/MacOS/velo-cli"
         test -x "$app/Contents/MacOS/velo"
+        test -x "$app/Contents/MacOS/velo-nmh"
         ;;
     MINGW* | MSYS* | CYGWIN*)
         installer="$(ls dist/velo-"$version"-windows-*.exe)"
@@ -48,6 +50,7 @@ case "$(uname -s)" in
         fi
         check "$cli"
         test -f "$(dirname "$cli")/velo.exe"
+        test -f "$(dirname "$cli")/velo-nmh.exe"
         ;;
     *)
         echo "unsupported OS: $(uname -s)" >&2

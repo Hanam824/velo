@@ -11,12 +11,14 @@
 #             dist/velo-v0.1.0-linux-x86_64.deb       (Linux)
 #             dist/velo-v0.1.0-linux-x86_64.AppImage  (Linux)
 #
-# The archive holds the Velo desktop app (`velo`), the `velo-cli` command-line tool, README.md and
-# LICENSE. The installers are made by cargo-packager (`cargo install cargo-packager --locked`)
-# from [package.metadata.packager] in crates/velo-gui/Cargo.toml, and are unsigned.
+# The archive holds the Velo desktop app (`velo`), the `velo-cli` command-line tool, the
+# `velo-nmh` browser helper (native-messaging host), README.md and LICENSE. The installers are
+# made by cargo-packager (`cargo install cargo-packager --locked`) from
+# [package.metadata.packager] in crates/velo-gui/Cargo.toml, and are unsigned.
 # Builds are native only: each platform is built on a machine of that platform. Stdout lists the
-# files made, one per line, the archive first. The release version is written into Cargo.toml for the build (so
-# `velo-cli --version` matches the tag) and Cargo.toml and Cargo.lock are restored afterwards.
+# files made, one per line, the archive first. The release version is written into Cargo.toml for
+# the build (so `velo-cli --version` matches the tag) and Cargo.toml and Cargo.lock are restored
+# afterwards.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -62,11 +64,11 @@ trap 'cp "$backup/Cargo.toml" "$backup/Cargo.lock" "$root/" && rm -rf "$backup"'
 # crates' versions in Cargo.lock by itself during the build; other dependencies stay locked.
 sed -i.bak "s/^version = \".*\"/version = \"${version#v}\"/" Cargo.toml
 rm Cargo.toml.bak
-cargo build --release -p velo-gui -p velo-cli >&2
+cargo build --release -p velo-gui -p velo-cli -p velo-nmh >&2
 
 # The macOS binaries must run on macOS 15 (MACOSX_DEPLOYMENT_TARGET in .cargo/config.toml).
 if [ "$os" = macos ]; then
-    for bin in velo velo-cli; do
+    for bin in velo velo-cli velo-nmh; do
         minos="$(otool -l "target/release/$bin" | awk '$1 == "minos" { print $2; exit }')"
         if [ "$minos" != 15.0 ]; then
             echo "$bin needs macOS ${minos:-(unknown)}, not 15.0" >&2
@@ -78,7 +80,7 @@ fi
 name="velo-$version-$os-$arch"
 rm -rf "dist/$name" "dist/$name.zip" "dist/$name.tar.gz"
 mkdir -p "dist/$name"
-for bin in velo velo-cli; do
+for bin in velo velo-cli velo-nmh; do
     cp "target/release/$bin$exe" "dist/$name/"
 done
 cp README.md LICENSE "dist/$name/"
