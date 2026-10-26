@@ -3,6 +3,7 @@
 //
 // The button lives in a closed shadow root, so YouTube's styles and Velo's don't mix.
 
+import { ext } from "./api.ts";
 import { type Answer, type Formats, type PageRequest, failure } from "./protocol.ts";
 import { videoId } from "./youtube-id.ts";
 
@@ -37,7 +38,7 @@ button.open:hover { opacity: 1; }
 
 /** Sends a request to the extension's background and waits for the host's answer. */
 function ask(request: PageRequest): Promise<Answer | undefined> {
-  return chrome.runtime.sendMessage(request).catch(() => undefined);
+  return ext.runtime.sendMessage(request).catch(() => undefined);
 }
 
 /** Whether YouTube is showing its dark theme. */
