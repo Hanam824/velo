@@ -61,7 +61,7 @@ jobs:
       version: ${{ inputs.version }}
       sha: ${{ needs.check.outputs.sha }}
 
-  # Runs only when every build passed, so a release always has all five archives.
+  # Runs only when every build passed, so a release always has all five archives and their installers.
   publish:
     name: Publish the GitHub release
     needs: [check, build]
@@ -74,7 +74,7 @@ jobs:
         with:
           ref: ${{ needs.check.outputs.sha }}
 
-      - name: Download the archives
+      - name: Download the archives and installers
         uses: actions/download-artifact@v8
         with:
           path: dist
