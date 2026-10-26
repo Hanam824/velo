@@ -82,23 +82,122 @@ pub struct Video {
     pub client: &'static str,
 }
 
+/// One way to download a video: a single stream, or a video stream and a sound stream that
+/// are joined after downloading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice<'a> {
+    /// One stream: video with sound, or sound only.
+    Single(&'a Format),
+    /// An MP4 video-only stream and an M4A sound stream, joined into one MP4.
+    Joined {
+        /// The video.
+        video: &'a Format,
+        /// The sound.
+        audio: &'a Format,
+    },
+}
+
+impl Choice<'_> {
+    /// The itags to download, in order: video then sound when joined.
+    pub fn itags(&self) -> Vec<u32> {
+        self.formats().iter().map(|f| f.itag).collect()
+    }
+
+    /// The streams to download, in order.
+    pub fn formats(&self) -> Vec<&Format> {
+        match *self {
+            Self::Single(format) => vec![format],
+            Self::Joined { video, audio } => vec![video, audio],
+        }
+    }
+
+    /// The total size, if YouTube gave every stream's.
+    pub fn size(&self) -> Option<u64> {
+        self.formats().iter().map(|f| f.content_length).sum()
+    }
+
+    /// The file extension of the result.
+    pub fn extension(&self) -> &str {
+        match self {
+            Self::Single(format) => format.extension(),
+            Self::Joined { .. } => "mp4",
+        }
+    }
+
+    /// The picture height, for video.
+    pub fn height(&self) -> Option<u32> {
+        self.formats()[0].height
+    }
+
+    /// Whether it has sound only.
+    pub fn is_audio_only(&self) -> bool {
+        matches!(self, Self::Single(f) if f.kind == StreamKind::Audio)
+    }
+}
+
 impl Video {
-    /// The formats worth offering, best first: video with sound (highest resolution first),
-    /// then sound only (highest bitrate first).
-    pub fn choices(&self) -> Vec<&Format> {
-        let mut muxed: Vec<&Format> = self
-            .formats
-            .iter()
-            .filter(|f| f.kind == StreamKind::Muxed)
-            .collect();
-        muxed.sort_by_key(|f| std::cmp::Reverse((f.height, f.fps, f.bitrate)));
+    /// The ways worth offering to download it, best first: video (with sound in the stream,
+    /// or joined from an MP4 video stream and the best M4A sound) by resolution, frame rate
+    /// and bitrate, then sound only by bitrate.
+    ///
+    /// For each resolution only the best MP4 video stream is joined, H.264 before other
+    /// codecs since more players handle it. WebM streams aren't joined.
+    pub fn choices(&self) -> Vec<Choice<'_>> {
+        let rank = |f: &Format| (f.height, f.fps, f.bitrate);
         let mut audio: Vec<&Format> = self
             .formats
             .iter()
             .filter(|f| f.kind == StreamKind::Audio)
             .collect();
         audio.sort_by_key(|f| std::cmp::Reverse(f.bitrate));
-        muxed.into_iter().chain(audio).collect()
+        let best_m4a = audio.iter().copied().find(|f| f.mime_type == "audio/mp4");
+
+        let mut videos: Vec<Choice<'_>> = self
+            .formats
+            .iter()
+            .filter(|f| f.kind == StreamKind::Muxed)
+            .map(Choice::Single)
+            .collect();
+        if let Some(audio) = best_m4a {
+            let mut by_height: Vec<&Format> = Vec::new();
+            for format in self
+                .formats
+                .iter()
+                .filter(|f| f.kind == StreamKind::Video && f.mime_type == "video/mp4")
+            {
+                let h264 = |f: &Format| f.codecs.iter().any(|c| c.starts_with("avc1"));
+                match by_height.iter_mut().find(|f| f.height == format.height) {
+                    Some(best) => {
+                        if (h264(format), rank(format)) > (h264(best), rank(best)) {
+                            *best = format;
+                        }
+                    }
+                    None => by_height.push(format),
+                }
+            }
+            videos.extend(
+                by_height
+                    .into_iter()
+                    .map(|video| Choice::Joined { video, audio }),
+            );
+        }
+        videos.sort_by_key(|c| std::cmp::Reverse(rank(c.formats()[0])));
+        videos
+            .into_iter()
+            .chain(audio.into_iter().map(Choice::Single))
+            .collect()
+    }
+
+    /// The choice that downloads `itags`: one stream, or a video and its sound to join.
+    pub fn choice(&self, itags: &[u32]) -> Option<Choice<'_>> {
+        match itags {
+            [itag] => Some(Choice::Single(self.format(*itag)?)),
+            [video, audio] => Some(Choice::Joined {
+                video: self.format(*video)?,
+                audio: self.format(*audio)?,
+            }),
+            _ => None,
+        }
     }
 
     /// The format with `itag`.
@@ -106,9 +205,9 @@ impl Video {
         self.formats.iter().find(|f| f.itag == itag)
     }
 
-    /// A file name for `format` of this video: the title, made safe, with the format's
+    /// A file name for `choice` of this video: the title, made safe, with the result's
     /// extension.
-    pub fn file_name(&self, format: &Format) -> String {
+    pub fn file_name(&self, choice: &Choice<'_>) -> String {
         let title: String = self
             .title
             .chars()
@@ -124,7 +223,7 @@ impl Video {
         } else {
             title
         };
-        format!("{title}.{}", format.extension())
+        format!("{title}.{}", choice.extension())
     }
 }
 

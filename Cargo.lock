@@ -6299,6 +6299,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "velo-core",
+ "velo-mux",
 ]
 
 [[package]]
@@ -6346,6 +6347,15 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "velo-core",
+]
+
+[[package]]
+name = "velo-mux"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.21",
+ "velo-mux",
 ]
 
 [[package]]
