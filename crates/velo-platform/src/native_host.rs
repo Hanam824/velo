@@ -102,7 +102,11 @@ fn manifest_dirs(home: &Path, _data_dir: &Path) -> Vec<(Family, PathBuf)> {
         (Family::Chromium, "Google/Chrome", "Google/Chrome"),
         (Family::Chromium, "Chromium", "Chromium"),
         (Family::Chromium, "Microsoft Edge", "Microsoft Edge"),
-        (Family::Chromium, "BraveSoftware/Brave-Browser", "BraveSoftware/Brave-Browser"),
+        (
+            Family::Chromium,
+            "BraveSoftware/Brave-Browser",
+            "BraveSoftware/Brave-Browser",
+        ),
         (Family::Chromium, "Vivaldi", "Vivaldi"),
         (Family::Firefox, "Firefox", "Mozilla"),
     ];
@@ -230,7 +234,11 @@ mod tests {
                 "Library/Application Support/Mozilla/NativeMessagingHosts",
             )
         } else {
-            (".config/google-chrome", ".mozilla", ".mozilla/native-messaging-hosts")
+            (
+                ".config/google-chrome",
+                ".mozilla",
+                ".mozilla/native-messaging-hosts",
+            )
         };
         std::fs::create_dir_all(home.path().join(chrome)).unwrap();
         std::fs::create_dir_all(home.path().join(firefox)).unwrap();
