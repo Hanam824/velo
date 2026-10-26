@@ -17,6 +17,8 @@ velo-ipc = { path = "crates/velo-ipc" }
 velo-platform = { path = "crates/velo-platform" }
 velo-store = { path = "crates/velo-store" }
 
+# Clipboard text, for clipboard monitoring (X11 and Wayland on Linux).
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.23"
 # Local time for the list's dates and the scheduler, the same way on every OS.

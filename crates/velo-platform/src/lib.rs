@@ -3,13 +3,15 @@
 //! Every function behaves the same on Windows, macOS and Linux; only where things live differs,
 //! following each OS's conventions.
 
+mod clipboard;
 mod dialogs;
 mod dirs;
 mod files;
 mod notify;
 mod power;
 
-pub use dialogs::{pick_folder, pick_save_path};
+pub use clipboard::ClipboardWatcher;
+pub use dialogs::{pick_file, pick_folder, pick_save_path};
 pub use dirs::AppDirs;
 pub use files::{open, reveal};
 pub use notify::notify;

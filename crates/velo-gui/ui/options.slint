@@ -1,7 +1,7 @@
-// The Options dialog. Only settings that do something are here; the rest of IDM's tabs are in
+// The Options dialog. Only settings that do something are here; the other tabs are in
 // the backlog in docs/PLAN.md.
 
-import { Button, CheckBox, ComboBox, LineEdit, ScrollView, SpinBox, TabWidget, VerticalBox } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ScrollView, SpinBox, TabWidget, TextEdit, VerticalBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 // A category and the folder its downloads go to; empty for the downloads folder.
@@ -30,6 +30,10 @@ component Labelled inherits HorizontalLayout {
 }
 
 export component OptionsWindow inherits Window {
+    // General.
+    in-out property <bool> monitor-clipboard;
+    // Extensions separated by spaces, such as "zip mp4 iso".
+    in-out property <string> capture-extensions;
     // Save To.
     in-out property <string> download-dir;
     in property <string> default-download-dir;
@@ -78,6 +82,26 @@ export component OptionsWindow inherits Window {
     VerticalBox {
         TabWidget {
             vertical-stretch: 1;
+            Tab {
+                title: "General";
+                VerticalBox {
+                    alignment: start;
+                    CheckBox {
+                        text: "Offer to download addresses copied to the clipboard";
+                        checked <=> root.monitor-clipboard;
+                    }
+                    Text {
+                        text: "File types to offer (extensions separated by spaces):";
+                        color: root.monitor-clipboard ? Theme.text : Theme.text-disabled;
+                    }
+                    TextEdit {
+                        height: 120px;
+                        text <=> root.capture-extensions;
+                        enabled: root.monitor-clipboard;
+                        wrap: word-wrap;
+                    }
+                }
+            }
             Tab {
                 title: "Save To";
                 VerticalBox {

@@ -188,6 +188,8 @@ fn fill(window: &OptionsWindow, settings: &Settings, downloads: &Path, temp: &Pa
             .unwrap_or_default()
             .into()
     };
+    window.set_monitor_clipboard(settings.monitor_clipboard);
+    window.set_capture_extensions(settings.capture_extensions.join(" ").into());
     window.set_download_dir(text(&settings.download_dir));
     window.set_default_download_dir(downloads.to_string_lossy().as_ref().into());
     window.set_temp_dir(text(&settings.temp_dir));
@@ -249,6 +251,8 @@ fn collect(window: &OptionsWindow, mut settings: Settings) -> Settings {
         let text = text.trim();
         (!text.is_empty()).then(|| PathBuf::from(text))
     };
+    settings.monitor_clipboard = window.get_monitor_clipboard();
+    settings.capture_extensions = extensions(&window.get_capture_extensions());
     settings.download_dir = path(window.get_download_dir());
     settings.temp_dir = path(window.get_temp_dir());
     for (category, row) in settings
@@ -289,6 +293,18 @@ fn collect(window: &OptionsWindow, mut settings: Settings) -> Settings {
         _ => velo_core::Appearance::System,
     };
     settings
+}
+
+/// The extensions in `text`, separated by spaces or commas: lowercase, without dots, each once.
+fn extensions(text: &str) -> Vec<String> {
+    let mut extensions: Vec<String> = Vec::new();
+    for word in text.split([' ', ',', '\n', '\t']) {
+        let word = word.trim().trim_start_matches('.').to_lowercase();
+        if !word.is_empty() && !extensions.contains(&word) {
+            extensions.push(word);
+        }
+    }
+    extensions
 }
 
 /// The index in [`CONNECTION_CHOICES`] closest to `count` from below.
@@ -356,6 +372,8 @@ mod tests {
         assert_eq!(window.get_connections_index(), 3, "8 connections");
         assert_eq!(window.get_proxy_mode(), 1, "system proxy");
         assert!(!window.get_limit_enabled());
+        assert!(window.get_monitor_clipboard());
+        assert!(window.get_capture_extensions().contains("zip"));
 
         window.set_download_dir("/data/downloads".into());
         window.invoke_category_folder_edited(4, "/data/video".into());
@@ -368,6 +386,8 @@ mod tests {
         window.set_proxy_mode(2);
         window.set_proxy_url("socks5://127.0.0.1:1080".into());
         window.set_appearance(2);
+        window.set_monitor_clipboard(false);
+        window.set_capture_extensions(".ZIP, iso\nzip".into());
         window.set_user_agent("Mozilla/5.0".into());
         assert!(window.get_close_to_tray());
         window.set_close_to_tray(false);
@@ -395,6 +415,8 @@ mod tests {
         assert_eq!(settings.proxy.mode, ProxyMode::Manual);
         assert_eq!(settings.user_agent.as_deref(), Some("Mozilla/5.0"));
         assert!(!settings.close_to_tray);
+        assert!(!settings.monitor_clipboard);
+        assert_eq!(settings.capture_extensions, ["zip", "iso"]);
         assert_eq!(*saved.borrow(), Some(velo_core::Appearance::Dark));
         assert_eq!(*recorder.0.borrow(), ["settings 16"]);
     }
