@@ -125,6 +125,27 @@ jobs:
       - name: Build
         run: npm run build
 
+  # The Safari app that carries the extension: generated with Apple's converter and built
+  # with Xcode, which only the macOS runners have.
+  safari:
+    name: Safari extension
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Build
+        run: ./scripts/build-safari.sh v0.0.0-ci
+
   # Licenses, security advisories and duplicate versions of the dependencies (deny.toml). Runs on
   # every pull request, docs-only included: it's quick and an advisory can appear at any time.
   deny:
@@ -142,7 +163,7 @@ jobs:
   # reports under its unexpanded name.
   result:
     name: CI result
-    needs: [changes, build, extension, deny]
+    needs: [changes, build, extension, safari, deny]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -151,11 +172,12 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           BUILD: ${{ needs.build.result }}
           EXTENSION: ${{ needs.extension.result }}
+          SAFARI: ${{ needs.safari.result }}
           DENY: ${{ needs.deny.result }}
         run: |
-          echo "changes: $CHANGES, build: $BUILD, extension: $EXTENSION, deny: $DENY"
+          echo "changes: $CHANGES, build: $BUILD, extension: $EXTENSION, safari: $SAFARI, deny: $DENY"
           if [ "$CHANGES" != "success" ] || [ "$DENY" != "success" ]; then exit 1; fi
-          for job in "$BUILD" "$EXTENSION"; do
+          for job in "$BUILD" "$EXTENSION" "$SAFARI"; do
             case "$job" in
               success | skipped) ;;
               *) exit 1 ;;
