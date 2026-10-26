@@ -7,6 +7,7 @@ use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use reqwest::{Client, Response, StatusCode, Url};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
+use tokio_util::sync::CancellationToken;
 
 use crate::probe::content_range_start;
 use crate::{Error, Result};
@@ -21,14 +22,15 @@ use crate::{Error, Result};
 /// without range support, pass `start` 0, `end` `None` and an empty part file.
 ///
 /// `on_progress` is called with the number of bytes written after each chunk. Returns
-/// [`Error::Incomplete`] if the connection ends early; the bytes received so far stay in the part
-/// file for the next attempt.
+/// [`Error::Incomplete`] if the connection ends early, and [`Error::Cancelled`] once `cancel` is
+/// cancelled; the bytes received so far stay in the part file for the next attempt.
 pub async fn fetch_range(
     client: &Client,
     url: &Url,
     part_path: &Path,
     start: u64,
     end: Option<u64>,
+    cancel: &CancellationToken,
     mut on_progress: impl FnMut(u64),
 ) -> Result<u64> {
     if let Some(dir) = part_path.parent() {
@@ -53,9 +55,10 @@ pub async fn fetch_range(
 
     let position = start + have;
     let mut response = if position > 0 || end.is_some() {
-        send_range(client, url, position, end).await?
+        cancellable(cancel, send_range(client, url, position, end)).await?
     } else {
-        let response = client.get(url.clone()).send().await?;
+        let response =
+            cancellable(cancel, async { Ok(client.get(url.clone()).send().await?) }).await?;
         if !response.status().is_success() {
             return Err(Error::Status(response.status()));
         }
@@ -72,7 +75,15 @@ pub async fn fetch_range(
     };
 
     let mut writer = BufWriter::new(file);
-    while let Some(chunk) = response.chunk().await? {
+    loop {
+        let chunk = match cancellable(cancel, async { Ok(response.chunk().await?) }).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                writer.flush().await?;
+                return Err(error);
+            }
+        };
         // A server may send more than asked for; keep only the requested range.
         let take = match expected {
             Some(expected) if end.is_some() => chunk.len().min((expected - have) as usize),
@@ -93,6 +104,18 @@ pub async fn fetch_range(
             expected,
         }),
         _ => Ok(have),
+    }
+}
+
+/// Runs `future`, or returns [`Error::Cancelled`] as soon as `cancel` is cancelled.
+pub(crate) async fn cancellable<T>(
+    cancel: &CancellationToken,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(Error::Cancelled),
+        result = future => result,
     }
 }
 

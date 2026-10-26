@@ -5,12 +5,14 @@
 
 mod category;
 mod download;
+mod event;
 mod queue;
 mod segment;
 mod settings;
 
 pub use category::Category;
 pub use download::{Download, DownloadId, DownloadState};
+pub use event::{EngineEvent, ProgressUpdate};
 pub use queue::{Queue, QueueId};
 pub use segment::{Segment, SegmentId, SegmentState};
 pub use settings::Settings;

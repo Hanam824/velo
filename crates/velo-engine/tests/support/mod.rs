@@ -10,6 +10,11 @@
 //! - `/slow/{name}`: like `/files`, sent in 8 KiB chunks 2 ms apart, so connections overlap.
 //! - `/flaky/{name}`: like `/slow`, but every other `GET` stops halfway through its range.
 //! - `/fail/{name}`: answers `HEAD` like `/files`, but every `GET` with `503`.
+//! - `/slower/{name}`: like `/slow`, in 2 KiB chunks 10 ms apart: a file takes several of the
+//!   engine's 250 ms progress intervals, so a test can pause or delete it mid-way.
+//! - `/versioned/{name}`: like `/slower`, with [`versioned_body`] and `ETag` `"v<n>"` for the
+//!   current version `n`, which starts at 0.
+//! - `/bump`: moves `/versioned` to the next version.
 //! - anything else: `404`.
 
 #![allow(dead_code)]
@@ -44,9 +49,26 @@ pub fn body() -> Vec<u8> {
         .collect()
 }
 
+/// The bytes of version `n` of `/versioned`: [`body`] with every byte XORed with `n`.
+pub fn versioned_body(n: u8) -> Vec<u8> {
+    body().into_iter().map(|b| b ^ n).collect()
+}
+
+/// How fast [`trickle`] sends: chunk size and the pause before each chunk.
+#[derive(Clone, Copy)]
+struct Pace(usize, Duration);
+
+/// 8 KiB every 2 ms.
+const SLOW: Pace = Pace(8 * 1024, Duration::from_millis(2));
+
+/// 2 KiB every 10 ms.
+const SLOWER: Pace = Pace(2 * 1024, Duration::from_millis(10));
+
 /// Starts the server on a free local port and returns its base URL, e.g. `http://127.0.0.1:1234`.
 pub async fn start() -> String {
     let gets = Arc::new(AtomicUsize::new(0));
+    let version = Arc::new(AtomicUsize::new(0));
+    let bump = Arc::clone(&version);
     let app = Router::new()
         .route(
             "/files/{name}",
@@ -104,7 +126,7 @@ pub async fn start() -> String {
         .route(
             "/slow/{name}",
             get(|method: Method, headers: HeaderMap| async move {
-                trickle(serve(&method, &headers, &body(), true, &[]), false).await
+                trickle(serve(&method, &headers, &body(), true, &[]), false, SLOW).await
             }),
         )
         .route(
@@ -115,8 +137,33 @@ pub async fn start() -> String {
                     let response = serve(&method, &headers, &body(), true, &[]);
                     let cut = method == Method::GET
                         && gets.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
-                    trickle(response, cut).await
+                    trickle(response, cut, SLOW).await
                 }
+            }),
+        )
+        .route(
+            "/slower/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                trickle(serve(&method, &headers, &body(), true, &[]), false, SLOWER).await
+            }),
+        )
+        .route(
+            "/versioned/{name}",
+            get(move |method: Method, headers: HeaderMap| {
+                let n = version.load(Ordering::Relaxed) as u8;
+                async move {
+                    let mut response = serve(&method, &headers, &versioned_body(n), true, &[]);
+                    let etag = format!("\"v{n}\"").parse().unwrap();
+                    response.headers_mut().insert(ETAG, etag);
+                    trickle(response, false, SLOWER).await
+                }
+            }),
+        )
+        .route(
+            "/bump",
+            get(move || async move {
+                bump.fetch_add(1, Ordering::Relaxed);
+                status(StatusCode::NO_CONTENT)
             }),
         )
         .route(
@@ -134,9 +181,9 @@ pub async fn start() -> String {
     format!("http://{address}")
 }
 
-/// Re-sends `response`'s body in 8 KiB chunks 2 ms apart; with `cut`, the connection fails
-/// halfway through.
-async fn trickle(response: Response<Body>, cut: bool) -> Response<Body> {
+/// Re-sends `response`'s body at `pace`; with `cut`, the connection fails halfway through.
+async fn trickle(response: Response<Body>, cut: bool, pace: Pace) -> Response<Body> {
+    let Pace(chunk, delay) = pace;
     let (parts, body) = response.into_parts();
     let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
     let stop = if cut { bytes.len() / 2 } else { bytes.len() };
@@ -150,8 +197,8 @@ async fn trickle(response: Response<Body>, cut: bool) -> Response<Body> {
                     (Err(error), usize::MAX)
                 });
             }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-            let next = (sent + 8 * 1024).min(stop);
+            tokio::time::sleep(delay).await;
+            let next = (sent + chunk).min(stop);
             Some((Ok::<Bytes, std::io::Error>(bytes.slice(sent..next)), next))
         }
     });

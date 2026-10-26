@@ -6,6 +6,7 @@ use std::sync::Once;
 use velo_core::{DownloadId, Segment};
 
 mod download;
+mod engine;
 mod fetch;
 mod filename;
 mod merge;
@@ -14,11 +15,13 @@ mod probe;
 mod segmented;
 
 pub use download::download_file;
+pub use engine::{Engine, EngineConfig, NewDownload};
 pub use fetch::fetch_range;
-pub use filename::{file_name, sanitize_file_name};
+pub use filename::{file_name, sanitize_file_name, unique_file_name};
 pub use merge::merge;
 pub use probe::{Probe, probe};
 pub use segmented::{Options, Progress, download_segments};
+pub use tokio_util::sync::CancellationToken;
 
 /// Errors from the download engine.
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +68,9 @@ pub enum Error {
         /// Size of the merged file.
         actual: u64,
     },
+    /// The download was stopped by its caller.
+    #[error("the download was stopped")]
+    Cancelled,
     /// Something already exists at the save path.
     #[error("{0} already exists")]
     Exists(PathBuf),

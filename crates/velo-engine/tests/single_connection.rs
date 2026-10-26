@@ -7,7 +7,7 @@ use std::fs;
 use reqwest::{StatusCode, Url};
 use velo_core::DownloadId;
 use velo_engine::planner::initial_segments;
-use velo_engine::{Error, client, fetch_range, part_path, probe};
+use velo_engine::{CancellationToken, Error, client, fetch_range, part_path, probe};
 
 use support::{ETAG_VALUE, LAST_MODIFIED_VALUE, SIZE, body};
 
@@ -94,6 +94,7 @@ async fn a_probed_file_downloads_into_its_part_file() {
         &part,
         segment.start,
         Some(segment.end),
+        &CancellationToken::new(),
         |n| progress += n,
     )
     .await
@@ -114,9 +115,15 @@ async fn a_fetch_resumes_after_the_bytes_already_in_the_part_file() {
     let whole = temp.path().join("whole.part");
     fs::write(&whole, &expected[..1000]).unwrap();
     let mut progress = 0;
-    let len = fetch_range(&client, &url, &whole, 0, Some(SIZE as u64), |n| {
-        progress += n
-    })
+    let len = fetch_range(
+        &client,
+        &url,
+        &whole,
+        0,
+        Some(SIZE as u64),
+        &CancellationToken::new(),
+        |n| progress += n,
+    )
     .await
     .unwrap();
     assert_eq!((len, progress), (SIZE as u64, SIZE as u64 - 1000));
@@ -125,9 +132,17 @@ async fn a_fetch_resumes_after_the_bytes_already_in_the_part_file() {
     // A middle range, to the end of the file.
     let middle = temp.path().join("middle.part");
     fs::write(&middle, &expected[5000..5100]).unwrap();
-    fetch_range(&client, &url, &middle, 5000, None, |_| {})
-        .await
-        .unwrap();
+    fetch_range(
+        &client,
+        &url,
+        &middle,
+        5000,
+        None,
+        &CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .unwrap();
     assert!(fs::read(&middle).unwrap() == expected[5000..]);
 }
 
@@ -139,9 +154,17 @@ async fn a_part_file_longer_than_its_range_is_cut_back() {
     let part = temp.path().join("long.part");
     fs::write(&part, &body()[100..3100]).unwrap();
 
-    let len = fetch_range(&client().unwrap(), &url, &part, 100, Some(2100), |_| {})
-        .await
-        .unwrap();
+    let len = fetch_range(
+        &client().unwrap(),
+        &url,
+        &part,
+        100,
+        Some(2100),
+        &CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .unwrap();
     assert_eq!(len, 2000);
     assert!(fs::read(&part).unwrap() == body()[100..2100]);
 }
@@ -154,14 +177,31 @@ async fn a_server_without_ranges_downloads_whole_but_cannot_resume() {
     let url = Url::parse(&format!("{base}/norange/data.bin")).unwrap();
 
     let part = temp.path().join("whole.part");
-    let len = fetch_range(&client, &url, &part, 0, None, |_| {})
-        .await
-        .unwrap();
+    let len = fetch_range(
+        &client,
+        &url,
+        &part,
+        0,
+        None,
+        &CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .unwrap();
     assert_eq!(len, SIZE as u64);
     assert!(fs::read(&part).unwrap() == body());
 
     let partial = temp.path().join("partial.part");
     fs::write(&partial, &body()[..10]).unwrap();
-    let resumed = fetch_range(&client, &url, &partial, 0, None, |_| {}).await;
+    let resumed = fetch_range(
+        &client,
+        &url,
+        &partial,
+        0,
+        None,
+        &CancellationToken::new(),
+        |_| {},
+    )
+    .await;
     assert!(matches!(resumed, Err(Error::RangeIgnored)), "{resumed:?}");
 }
