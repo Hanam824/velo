@@ -82,6 +82,52 @@ pub struct Video {
     pub client: &'static str,
 }
 
+impl Video {
+    /// The formats worth offering, best first: video with sound (highest resolution first),
+    /// then sound only (highest bitrate first).
+    pub fn choices(&self) -> Vec<&Format> {
+        let mut muxed: Vec<&Format> = self
+            .formats
+            .iter()
+            .filter(|f| f.kind == StreamKind::Muxed)
+            .collect();
+        muxed.sort_by_key(|f| std::cmp::Reverse((f.height, f.fps, f.bitrate)));
+        let mut audio: Vec<&Format> = self
+            .formats
+            .iter()
+            .filter(|f| f.kind == StreamKind::Audio)
+            .collect();
+        audio.sort_by_key(|f| std::cmp::Reverse(f.bitrate));
+        muxed.into_iter().chain(audio).collect()
+    }
+
+    /// The format with `itag`.
+    pub fn format(&self, itag: u32) -> Option<&Format> {
+        self.formats.iter().find(|f| f.itag == itag)
+    }
+
+    /// A file name for `format` of this video: the title, made safe, with the format's
+    /// extension.
+    pub fn file_name(&self, format: &Format) -> String {
+        let title: String = self
+            .title
+            .chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                c if c.is_control() => '_',
+                c => c,
+            })
+            .collect();
+        let title = title.trim().trim_end_matches('.');
+        let title = if title.is_empty() {
+            self.id.as_str()
+        } else {
+            title
+        };
+        format!("{title}.{}", format.extension())
+    }
+}
+
 /// Asks YouTube about videos.
 #[derive(Debug, Clone)]
 pub struct Extractor {
@@ -398,6 +444,25 @@ fn set_parameter(format: &mut Format, key: &str, value: &str) {
         .extend_pairs(pairs)
         .append_pair(key, value);
     format.url = Some(url.into());
+}
+
+impl velo_core::Resolver for Extractor {
+    /// The current addresses of a YouTube source's formats, in its order.
+    fn resolve<'a>(&'a self, source: &'a velo_core::Source) -> velo_core::Resolving<'a> {
+        Box::pin(async move {
+            let velo_core::Source::YouTube { video_id, itags } = source;
+            let video = self.video(video_id).await.map_err(|e| e.to_string())?;
+            itags
+                .iter()
+                .map(|itag| {
+                    video
+                        .format(*itag)
+                        .and_then(|f| f.url.clone())
+                        .ok_or_else(|| format!("YouTube no longer offers format {itag}"))
+                })
+                .collect()
+        })
+    }
 }
 
 /// The parts of a `/youtubei/v1/player` answer the extractor reads.

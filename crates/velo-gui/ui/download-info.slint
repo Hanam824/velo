@@ -21,8 +21,12 @@ export component DownloadInfoDialog inherits Window {
     in property <bool> probing: true;
     // The error message if asking the server failed.
     in property <string> error;
+    // For a video: the formats to choose from, best first.
+    in property <[string]> formats;
+    in-out property <int> format-index;
 
     callback category-changed(index: int);
+    callback format-changed(index: int);
     // The user typed in Save As.
     callback save-path-edited();
     callback browse();
@@ -55,6 +59,18 @@ export component DownloadInfoDialog inherits Window {
                         overflow: elide;
                         vertical-alignment: center;
                         color: Theme.text-muted;
+                    }
+                }
+                if root.formats.length > 0: Row {
+                    Text {
+                        text: "Format:";
+                        vertical-alignment: center;
+                        color: Theme.text;
+                    }
+                    ComboBox {
+                        model: root.formats;
+                        current-index <=> root.format-index;
+                        selected => { root.format-changed(self.current-index); }
                     }
                 }
                 Row {

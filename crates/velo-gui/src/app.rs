@@ -560,6 +560,7 @@ fn download_id(raw: i32) -> Option<DownloadId> {
 
 #[cfg(test)]
 pub mod tests {
+    use velo_core::Source;
     use velo_core::{DownloadState, ProgressUpdate};
 
     use super::*;
@@ -581,6 +582,12 @@ pub mod tests {
                 new.description,
                 new.start,
             ));
+            if let Some(Source::YouTube { video_id, itags }) = new.source {
+                let last = self.0.borrow_mut().pop().unwrap();
+                self.0
+                    .borrow_mut()
+                    .push(format!("{last} youtube={video_id}:{itags:?}"));
+            }
             DownloadId(99)
         }
         fn resume(&self, id: DownloadId) {

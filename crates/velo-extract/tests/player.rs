@@ -99,6 +99,13 @@ async fn the_next_client_is_tried_when_one_is_refused() {
     assert_eq!(video.formats[1].height, Some(1080));
     assert_eq!(video.formats[2].content_length, Some(3_430_000));
 
+    let choices: Vec<u32> = video.choices().iter().map(|f| f.itag).collect();
+    assert_eq!(choices, [18, 140], "video with sound, then sound only");
+    assert_eq!(
+        video.file_name(video.format(140).unwrap()),
+        "Velo test video.m4a"
+    );
+
     let requests = requests.lock().unwrap();
     let names: Vec<&str> = requests.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, ["28", "5"], "ANDROID_VR, then IOS");
@@ -215,4 +222,23 @@ async fn web_addresses_are_unscrambled_with_the_player_and_the_player_is_cached(
         .unwrap();
     assert_eq!(PLAYER_DOWNLOADS.load(Ordering::SeqCst) - before, 1);
     std::fs::remove_dir_all(&cache).unwrap();
+}
+
+#[tokio::test]
+async fn the_extractor_resolves_sources_to_current_addresses() {
+    use velo_core::{Resolver, Source};
+    let (extractor, _) = start().await;
+    let source = |itags: Vec<u32>| Source::YouTube {
+        video_id: "okokokokok1".into(),
+        itags,
+    };
+    assert_eq!(
+        extractor.resolve(&source(vec![137, 140])).await.unwrap(),
+        [
+            "https://media.test/videoplayback?itag=137&id=okokokokok1",
+            "https://media.test/videoplayback?itag=140&id=okokokokok1"
+        ]
+    );
+    let missing = extractor.resolve(&source(vec![22])).await.unwrap_err();
+    assert!(missing.contains("22"), "{missing}");
 }

@@ -38,6 +38,7 @@ fn engine(root: &Path, downloads: Vec<velo_core::Download>) -> Engine {
             max_retries: 3,
             delay: Duration::from_millis(5),
         },
+        resolver: None,
     };
     Engine::start(config, downloads, Vec::new()).unwrap()
 }
@@ -72,6 +73,7 @@ async fn a_server_that_cuts_every_connection_still_yields_the_exact_file() {
         max_retries: 2,
         retry_delay: Duration::from_millis(5),
         limiters: Vec::new(),
+        max_request_size: None,
     };
     // Every request is cut after 64 KiB; each retry resumes where the last stopped.
     let path = download_file(
@@ -104,6 +106,7 @@ async fn a_flaky_download_paused_and_resumed_after_a_restart_yields_the_exact_fi
         description: String::new(),
         start: true,
         request: RequestOptions::default(),
+        source: None,
     });
 
     // Pause once some data is in, after at least one connection was cut.
