@@ -340,6 +340,7 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - Toolbar buttons Grabber (with the Site Grabber) and Share (needs a project page to share).
 - Options tabs not built yet: File types (Phase 2 capture), Sounds (per-event sounds need an audio library), and a proxy login (with the OS keychain). General has clipboard monitoring; its browser-integration settings come with Phase 2.
 - "Open with…" in Download complete and the context menu: each OS has its own app chooser and no common way to call it.
+- Solving YouTube's current player script. Since 2025, `base.js` keeps its strings in a table (`aa="…".split(";")`) and flattens its functions into numeric dispatch, so `velo-extract`'s searches can't cut out the signature and n functions; the TV and WEB clients then fail with "player changed" and Velo relies on the clients with direct addresses (Android VR, iOS). The fix is an AST-based solver that runs the whole player in boa, like yt-dlp's EJS solver (Unlicense), with a parser such as meriyah.
 - Saved logins (Options → Site Logins, and Add URL credentials that survive a restart): needs the OS keychain so passwords are never stored in plain text. Until then credentials live in memory only.
 
 ---

@@ -60,8 +60,31 @@ impl Client {
         needs_player: false,
     };
 
-    /// The clients tried by default, in order.
-    pub const DEFAULT_ORDER: [Self; 2] = [Self::ANDROID_VR, Self::IOS];
+    /// The TV app: needs the player's JavaScript, but plays many age-restricted videos.
+    pub const TV: Self = Self {
+        name: "tv",
+        client_name: "TVHTML5",
+        client_version: "7.20250312.16.00",
+        client_id: 7,
+        user_agent: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+        device: &[],
+        needs_player: true,
+    };
+
+    /// The website: needs the player's JavaScript.
+    pub const WEB: Self = Self {
+        name: "web",
+        client_name: "WEB",
+        client_version: "2.20250312.04.00",
+        client_id: 1,
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        device: &[],
+        needs_player: true,
+    };
+
+    /// The clients tried by default, in order: the ones with direct addresses first, since
+    /// they need no player script.
+    pub const DEFAULT_ORDER: [Self; 4] = [Self::ANDROID_VR, Self::IOS, Self::TV, Self::WEB];
 
     /// The body of a `/youtubei/v1/player` request for `video_id`, with `signature_timestamp`
     /// from the player's JavaScript for clients that need it.
@@ -111,5 +134,12 @@ mod tests {
             body["playbackContext"]["contentPlaybackContext"]["signatureTimestamp"],
             20_160
         );
+    }
+
+    #[test]
+    fn clients_with_direct_addresses_come_first() {
+        let order = Client::DEFAULT_ORDER;
+        let first_needing = order.iter().position(|c| c.needs_player).unwrap();
+        assert!(order[first_needing..].iter().all(|c| c.needs_player));
     }
 }

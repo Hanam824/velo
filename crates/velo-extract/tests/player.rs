@@ -1,11 +1,12 @@
 //! The extractor against a local stand-in for YouTube's player API, with synthetic answers.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use serde_json::Value;
 use velo_extract::{Client, Error, Extractor, StreamKind};
 
@@ -22,14 +23,30 @@ fn answer(video_id: &str, client_name: &str) -> Result<&'static str, StatusCode>
         ("privatevid1", _) => include_str!("fixtures/private.json"),
         ("removedvid1", _) => include_str!("fixtures/removed.json"),
         ("brokenvid11", "ANDROID_VR") => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        ("webwebweb01", "WEB") => include_str!("fixtures/web.json"),
+        ("webwebweb01", _) => include_str!("fixtures/unplayable.json"),
         _ => "not json",
     })
 }
+
+/// How many times the stand-in sent the player script.
+static PLAYER_DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
 
 /// Starts the stand-in and returns an extractor pointed at it and what it receives.
 async fn start() -> (Extractor, Requests) {
     let requests = Requests::default();
     let app = Router::new()
+        .route(
+            "/iframe_api",
+            get(|| async { include_str!("fixtures/iframe_api") }),
+        )
+        .route(
+            "/s/player/a1b2c3d4/player_ias.vflset/en_US/base.js",
+            get(|| async {
+                PLAYER_DOWNLOADS.fetch_add(1, Ordering::SeqCst);
+                include_str!("fixtures/base.js")
+            }),
+        )
         .route(
             "/youtubei/v1/player",
             post(
@@ -137,4 +154,65 @@ async fn other_addresses_are_refused_without_asking() {
     let only_ios = extractor.with_clients(vec![Client::IOS]);
     assert_eq!(only_ios.video("okokokokok1").await.unwrap().client, "ios");
     assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn web_addresses_are_unscrambled_with_the_player_and_the_player_is_cached() {
+    let (extractor, requests) = start().await;
+    let cache = std::env::temp_dir().join(format!("velo-extract-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    std::fs::create_dir_all(&cache).unwrap();
+    for old in ["old1.js", "old2.js", "old3.js"] {
+        std::fs::write(cache.join(old), "// an older player").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let web = extractor
+        .with_cache_dir(cache.clone())
+        .with_clients(vec![Client::WEB]);
+    let before = PLAYER_DOWNLOADS.load(Ordering::SeqCst);
+
+    let video = web.video("webwebweb01").await.unwrap();
+    assert_eq!(video.client, "web");
+    let urls: Vec<&str> = video
+        .formats
+        .iter()
+        .map(|f| f.url.as_deref().unwrap())
+        .collect();
+    // A replaced parameter moves to the end of the query.
+    assert_eq!(
+        urls,
+        [
+            "https://media.test/videoplayback?itag=18&id=webwebweb01&n=hgfedcba21ji",
+            "https://media.test/videoplayback?itag=140&id=webwebweb01&sig=ewvutsrqponmlkjihgfxdcbaZYXWVUTSRQPONMLKJIHGFEDCBA9876540213&n=stuvwxyzopqr",
+        ]
+    );
+    assert!(video.formats.iter().all(|f| !f.needs_deciphering()));
+    {
+        let requests = requests.lock().unwrap();
+        let (_, body) = requests.last().unwrap();
+        assert_eq!(
+            body["playbackContext"]["contentPlaybackContext"]["signatureTimestamp"],
+            20160
+        );
+    }
+
+    // The script is downloaded once, kept with the two newest older ones, and read from the
+    // cache by a new extractor.
+    web.video("webwebweb01").await.unwrap();
+    assert_eq!(PLAYER_DOWNLOADS.load(Ordering::SeqCst) - before, 1);
+    let mut cached: Vec<String> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    cached.sort();
+    assert_eq!(cached, ["a1b2c3d4.js", "old2.js", "old3.js"]);
+    let (fresh, _) = start().await;
+    fresh
+        .with_cache_dir(cache.clone())
+        .with_clients(vec![Client::WEB])
+        .video("webwebweb01")
+        .await
+        .unwrap();
+    assert_eq!(PLAYER_DOWNLOADS.load(Ordering::SeqCst) - before, 1);
+    std::fs::remove_dir_all(&cache).unwrap();
 }

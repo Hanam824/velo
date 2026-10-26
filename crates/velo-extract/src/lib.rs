@@ -8,6 +8,10 @@
 mod client;
 mod format;
 mod id;
+mod player;
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use reqwest::Url;
 use reqwest::header::{CONTENT_TYPE, ORIGIN, USER_AGENT};
@@ -16,6 +20,7 @@ use serde::Deserialize;
 pub use client::Client;
 pub use format::{Format, StreamKind};
 pub use id::{is_video_id, video_id};
+pub use player::Player;
 
 use crate::format::RawFormat;
 
@@ -43,6 +48,15 @@ pub enum Error {
     /// The request couldn't be made.
     #[error(transparent)]
     Http(#[from] reqwest::Error),
+    /// The player script no longer has the shape the extractor looks for.
+    #[error("YouTube's player changed and Velo can't read it yet ({0})")]
+    PlayerChanged(String),
+    /// The player's functions failed when run.
+    #[error("YouTube's player script failed: {0}")]
+    PlayerFailed(String),
+    /// The player script couldn't be cached.
+    #[error("couldn't cache YouTube's player: {0}")]
+    Cache(#[from] std::io::Error),
     /// YouTube's answer wasn't what the extractor expects.
     #[error("unreadable answer from YouTube: {0}")]
     Unreadable(#[from] serde_json::Error),
@@ -74,6 +88,10 @@ pub struct Extractor {
     http: reqwest::Client,
     base: Url,
     clients: Vec<Client>,
+    /// Where player scripts are kept between runs; memory only if `None`.
+    cache_dir: Option<PathBuf>,
+    /// The player last read, shared by clones.
+    player: Arc<Mutex<Option<Arc<Player>>>>,
 }
 
 impl Extractor {
@@ -87,7 +105,16 @@ impl Extractor {
             http,
             base: Url::parse(Self::YOUTUBE).expect("a valid address"),
             clients: Client::DEFAULT_ORDER.to_vec(),
+            cache_dir: None,
+            player: Arc::default(),
         }
+    }
+
+    /// Keeps the player scripts it downloads in `dir`, the newest few, so they needn't be
+    /// downloaded again after a restart.
+    pub fn with_cache_dir(mut self, dir: PathBuf) -> Self {
+        self.cache_dir = Some(dir);
+        self
     }
 
     /// Sends requests to `base` instead of YouTube; for tests against a local server.
@@ -117,7 +144,19 @@ impl Extractor {
         let mut age_restricted = false;
         let mut login_required = None;
         for client in &self.clients {
-            let response = match self.player(client, id).await {
+            let player = if client.needs_player {
+                match self.load_player().await {
+                    Ok(player) => Some(player),
+                    Err(error) => {
+                        refusals.push(format!("{}: {error}", client.name));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let timestamp = player.as_ref().and_then(|p| p.signature_timestamp);
+            let response = match self.ask(client, id, timestamp).await {
                 Ok(response) => response,
                 Err(error) => {
                     refusals.push(format!("{}: {error}", client.name));
@@ -148,7 +187,7 @@ impl Extractor {
                 }
             }
             let streams = response.streaming_data.unwrap_or_default();
-            let formats: Vec<Format> = streams
+            let mut formats: Vec<Format> = streams
                 .formats
                 .into_iter()
                 .filter_map(|f| f.into_format(false))
@@ -158,8 +197,17 @@ impl Extractor {
                         .into_iter()
                         .filter_map(|f| f.into_format(true)),
                 )
-                .filter(|f| !f.needs_deciphering())
                 .collect();
+            if let Some(player) = player {
+                formats = match decipher(player, formats).await {
+                    Ok(formats) => formats,
+                    Err(error) => {
+                        refusals.push(format!("{}: {error}", client.name));
+                        continue;
+                    }
+                };
+            }
+            formats.retain(|f| !f.needs_deciphering());
             if formats.is_empty() {
                 refusals.push(format!("{}: no streams", client.name));
                 continue;
@@ -183,8 +231,14 @@ impl Extractor {
         })
     }
 
-    /// Asks `/youtubei/v1/player` about video `id` as `client`.
-    async fn player(&self, client: &Client, id: &str) -> Result<PlayerResponse> {
+    /// Asks `/youtubei/v1/player` about video `id` as `client`, sending the player's
+    /// `timestamp` if it has one.
+    async fn ask(
+        &self,
+        client: &Client,
+        id: &str,
+        timestamp: Option<u64>,
+    ) -> Result<PlayerResponse> {
         let url = self
             .base
             .join("youtubei/v1/player?prettyPrint=false")
@@ -197,12 +251,153 @@ impl Extractor {
             .header(ORIGIN, "https://www.youtube.com")
             .header("X-YouTube-Client-Name", client.client_id.to_string())
             .header("X-YouTube-Client-Version", client.client_version)
-            .body(client.player_request(id, None).to_string())
+            .body(client.player_request(id, timestamp).to_string())
             .send()
             .await?
             .error_for_status()?;
         Ok(serde_json::from_slice(&response.bytes().await?)?)
     }
+}
+
+impl Extractor {
+    /// The current player, read from the cache if this version was seen before.
+    async fn load_player(&self) -> Result<Arc<Player>> {
+        let api = self.text("iframe_api").await?;
+        let id = player::player_id(&api)
+            .ok_or_else(|| Error::PlayerChanged("couldn't find the player version".into()))?;
+        if let Some(player) = self.player.lock().unwrap().as_ref()
+            && player.id == id
+        {
+            return Ok(player.clone());
+        }
+        let cached = self
+            .cache_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("{id}.js")));
+        let js = match &cached {
+            Some(path) if path.exists() => tokio::fs::read_to_string(path).await?,
+            _ => {
+                let js = self.text(&player::player_path(&id)).await?;
+                if let Some(path) = &cached {
+                    self.save_player(path, &js).await?;
+                }
+                js
+            }
+        };
+        let player = tokio::task::spawn_blocking(move || Player::from_js(&id, &js))
+            .await
+            .map_err(|e| Error::PlayerFailed(e.to_string()))??;
+        let player = Arc::new(player);
+        *self.player.lock().unwrap() = Some(player.clone());
+        Ok(player)
+    }
+
+    /// Writes player script `js` to `path`, keeping only the newest [`CACHED_PLAYERS`].
+    async fn save_player(&self, path: &std::path::Path, js: &str) -> Result<()> {
+        let dir = path.parent().expect("a file in the cache folder");
+        tokio::fs::create_dir_all(dir).await?;
+        tokio::fs::write(path, js).await?;
+        let mut scripts = Vec::new();
+        let mut entries = tokio::fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.path().extension().is_some_and(|e| e == "js") {
+                let modified = entry.metadata().await?.modified()?;
+                scripts.push((modified, entry.path()));
+            }
+        }
+        scripts.sort();
+        let excess = scripts.len().saturating_sub(CACHED_PLAYERS);
+        for (_, old) in scripts.into_iter().take(excess) {
+            if old != path {
+                tokio::fs::remove_file(old).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The text at `path` on YouTube.
+    async fn text(&self, path: &str) -> Result<String> {
+        let url = self.base.join(path).expect("a valid path");
+        let response = self
+            .http
+            .get(url)
+            .header(USER_AGENT, Client::WEB.user_agent)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.text().await?)
+    }
+}
+
+/// How many player scripts the cache keeps.
+const CACHED_PLAYERS: usize = 3;
+
+/// Unscrambles the signatures and transforms the `n` parameters of `formats` with `player`.
+async fn decipher(player: Arc<Player>, mut formats: Vec<Format>) -> Result<Vec<Format>> {
+    // The address of each format with its scrambled signature and the parameter name for it.
+    let mut ciphered = Vec::new();
+    for (index, format) in formats.iter_mut().enumerate() {
+        if let Some(cipher) = format.signature_cipher.take() {
+            let pairs = query_pairs(&cipher);
+            let get = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+            let (Some(url), Some(signature)) = (get("url"), get("s")) else {
+                continue;
+            };
+            format.url = Some(url);
+            let parameter = get("sp").unwrap_or_else(|| "signature".into());
+            ciphered.push((index, signature, parameter));
+        }
+    }
+    let ns: Vec<(usize, String)> = formats
+        .iter()
+        .enumerate()
+        .filter_map(|(index, f)| {
+            let url = f.url.as_deref()?;
+            let n = query_pairs(url.split_once('?')?.1)
+                .into_iter()
+                .find(|(k, _)| k == "n")?
+                .1;
+            Some((index, n))
+        })
+        .collect();
+    let signatures: Vec<String> = ciphered.iter().map(|(_, s, _)| s.clone()).collect();
+    let n_inputs: Vec<String> = ns.iter().map(|(_, n)| n.clone()).collect();
+    let (signatures, n_outputs) =
+        tokio::task::spawn_blocking(move || player.solve(&signatures, &n_inputs))
+            .await
+            .map_err(|e| Error::PlayerFailed(e.to_string()))??;
+    for ((index, _, parameter), signature) in ciphered.into_iter().zip(signatures) {
+        set_parameter(&mut formats[index], &parameter, &signature);
+    }
+    for ((index, _), n) in ns.into_iter().zip(n_outputs) {
+        set_parameter(&mut formats[index], "n", &n);
+    }
+    Ok(formats)
+}
+
+/// The decoded `key=value` pairs of query string `query`.
+fn query_pairs(query: &str) -> Vec<(String, String)> {
+    Url::parse(&format!("http://x/?{query}"))
+        .map(|url| url.query_pairs().into_owned().collect())
+        .unwrap_or_default()
+}
+
+/// Sets query parameter `key` of `format`'s address to `value`, replacing an old one.
+fn set_parameter(format: &mut Format, key: &str, value: &str) {
+    let Some(url) = format.url.as_deref().and_then(|u| Url::parse(u).ok()) else {
+        return;
+    };
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .into_owned()
+        .filter(|(k, _)| k != key)
+        .collect();
+    let mut url = url;
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(pairs)
+        .append_pair(key, value);
+    format.url = Some(url.into());
 }
 
 /// The parts of a `/youtubei/v1/player` answer the extractor reads.
