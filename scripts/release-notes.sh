@@ -17,6 +17,7 @@ Download the installer for your system:
 - Linux (x86_64): \`velo-$version-linux-x86_64.deb\` or \`velo-$version-linux-x86_64.AppImage\`
 
 Each system also has a plain archive (\`.zip\` on Windows, \`.tar.gz\` elsewhere) with \`velo\` (Velo Download Manager) and \`velo-cli\` (the command-line tool).
+Browser extensions: \`velo-$version-extension-chromium.zip\` (Chrome, Edge, Brave), \`velo-$version-extension-firefox.zip\` and \`velo-$version-safari-extension-macos.zip\` (Safari); see the README for installing them.
 The Windows installer installs for the current user, with no admin rights needed. macOS 15 or later is required.
 On Linux, the archive and the AppImage need fontconfig and libxkbcommon installed.
 The builds aren't signed or notarized: on macOS, run \`xattr -dr com.apple.quarantine "/Applications/Velo Download Manager.app"\` once if it's blocked; on Windows, SmartScreen may warn on first launch.

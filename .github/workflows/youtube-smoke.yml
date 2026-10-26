@@ -1,0 +1,77 @@
+name: YouTube smoke test
+
+# Checks every night that Velo can still get a real YouTube video's streams, since YouTube
+# changes without notice. It is separate from CI and never blocks a pull request: when it fails,
+# it opens (or adds to) an issue labelled `youtube-broken`, and closes that issue once it passes
+# again.
+on:
+  schedule:
+    - cron: "30 17 * * *" # 17:30 UTC, after the nightly build
+  workflow_dispatch:
+
+concurrency:
+  group: youtube-smoke
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write # open, comment on and close the youtube-broken issue
+
+jobs:
+  live:
+    name: Get a real video's streams
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os }}-${{ runner.arch }}
+
+      - name: Ask YouTube
+        id: live
+        continue-on-error: true
+        env:
+          VELO_LIVE_YOUTUBE: "1"
+        run: |
+          set -o pipefail
+          cargo test -p velo-extract --test live --locked -- --ignored --nocapture 2>&1 | tee live.log
+
+      - name: Report a failure in an issue
+        if: steps.live.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create youtube-broken --color B60205 \
+            --description "YouTube extraction stopped working" 2>/dev/null || true
+          {
+            echo "The nightly YouTube check failed: $RUN"
+            echo
+            echo '```'
+            grep -E "android_vr|ios|tv|web|panicked|Error|formats|kbps|joined" live.log | tail -n 30
+            echo '```'
+          } > report.md
+          issue="$(gh issue list --label youtube-broken --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body-file report.md
+          else
+            gh issue create --title "YouTube extraction is broken" --label youtube-broken --body-file report.md
+          fi
+          exit 1
+
+      - name: Close a fixed issue
+        if: steps.live.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for issue in $(gh issue list --label youtube-broken --state open --json number --jq '.[].number'); do
+            gh issue close "$issue" --comment "The nightly YouTube check passes again: $RUN"
+          done

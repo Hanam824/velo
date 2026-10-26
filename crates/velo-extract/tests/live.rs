@@ -35,4 +35,17 @@ async fn a_real_video_has_streams() {
     assert!(video.duration.is_some_and(|d| d > 0));
     assert!(video.formats.iter().any(|f| f.kind == StreamKind::Audio));
     assert!(video.formats.iter().any(|f| f.kind != StreamKind::Audio));
+
+    // YouTube may list streams but refuse to send them; ask for the first bytes of the best.
+    let best = video.choices()[0];
+    let url = best.formats()[0].url.clone().unwrap();
+    let response = velo_engine::client()
+        .unwrap()
+        .get(&url)
+        .header("Range", "bytes=0-1023")
+        .send()
+        .await
+        .unwrap();
+    eprintln!("{}: {}", best.label(), response.status());
+    assert_eq!(response.status().as_u16(), 206, "the stream should be served");
 }
