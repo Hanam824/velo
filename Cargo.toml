@@ -17,11 +17,18 @@ velo-ipc = { path = "crates/velo-ipc" }
 velo-platform = { path = "crates/velo-platform" }
 velo-store = { path = "crates/velo-store" }
 
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+percent-encoding = "2"
 proptest = "1"
+# rustls with the ring provider: the default aws-lc provider carries the OpenSSL license, which deny.toml doesn't allow.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 slint = "1.18"
 slint-build = "1.18"
+tempfile = "3"
 thiserror = "2"
+tokio = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
