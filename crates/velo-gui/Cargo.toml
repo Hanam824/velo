@@ -17,6 +17,7 @@ velo-core.workspace = true
 velo-engine.workspace = true
 velo-extract.workspace = true
 velo-ipc.workspace = true
+velo-nmh.workspace = true
 velo-platform.workspace = true
 velo-store.workspace = true
 slint.workspace = true

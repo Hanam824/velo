@@ -18,11 +18,10 @@ for (const browser of browsers) {
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
   const common = { bundle: true, target: ["chrome110", "firefox115", "safari16"], logLevel: "warning" };
-  // The background is a module; content scripts run as plain scripts.
-  await build({ ...common, entryPoints: ["src/background.ts"], outfile: `${out}/background.js`, format: "esm" });
+  // Every script is bundled into one plain script: Safari doesn't run module backgrounds.
   await build({
     ...common,
-    entryPoints: ["src/youtube.ts", "src/bypass.ts"],
+    entryPoints: ["src/background.ts", "src/youtube.ts", "src/bypass.ts"],
     outdir: out,
     format: "iife",
   });
