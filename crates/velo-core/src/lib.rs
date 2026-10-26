@@ -15,7 +15,7 @@ pub use download::{Download, DownloadId, DownloadState};
 pub use event::{EngineEvent, ProgressUpdate};
 pub use queue::{Queue, QueueId};
 pub use segment::{Segment, SegmentId, SegmentState};
-pub use settings::{ConnectionLimit, ProxyMode, ProxySettings, Settings};
+pub use settings::{Appearance, ConnectionLimit, ProxyMode, ProxySettings, Settings};
 
 /// Errors from Velo's domain layer.
 #[derive(Debug, thiserror::Error)]

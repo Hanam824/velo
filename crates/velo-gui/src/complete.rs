@@ -13,7 +13,7 @@ use velo_core::{Download, DownloadId};
 use crate::config::Config;
 use crate::list::file_kind;
 use crate::progress::DownloadOptions;
-use crate::{CompleteWindow, ShutdownWindow, format};
+use crate::{CompleteWindow, ShutdownWindow, format, theme};
 
 /// Seconds between a download finishing and the computer turning off, so the user can cancel.
 const SHUTDOWN_DELAY: i32 = 30;
@@ -97,6 +97,7 @@ impl Completion {
     /// Shows the Download complete dialog for `download`.
     fn show(self: &Rc<Self>, download: &Download) -> Result<(), slint::PlatformError> {
         let window = CompleteWindow::new()?;
+        theme::apply(&window, self.config.settings().appearance);
         let path = download.save_path();
         window.set_address(download.url.as_str().into());
         window.set_size(
@@ -148,6 +149,7 @@ impl Completion {
             return Ok(());
         }
         let window = ShutdownWindow::new()?;
+        theme::apply(&window, self.config.settings().appearance);
         window.set_seconds(SHUTDOWN_DELAY);
         let this = Rc::downgrade(self);
         window.on_shutdown_now(move || {

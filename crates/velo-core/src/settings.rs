@@ -38,6 +38,21 @@ pub struct Settings {
     pub show_progress_dialog: bool,
     /// Whether a download that finishes shows the Download complete dialog.
     pub show_complete_dialog: bool,
+    /// Light, dark, or as the operating system is set.
+    pub appearance: Appearance,
+}
+
+/// The colour scheme of Velo's windows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// As the operating system is set.
+    #[default]
+    System,
+    /// Light.
+    Light,
+    /// Dark.
+    Dark,
 }
 
 /// How Velo connects to servers.
@@ -152,6 +167,7 @@ impl Default for Settings {
             connection_limits: Vec::new(),
             show_progress_dialog: true,
             show_complete_dialog: true,
+            appearance: Appearance::System,
         }
     }
 }

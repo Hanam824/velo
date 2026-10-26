@@ -10,22 +10,29 @@ use velo_engine::DownloadEdit;
 
 use crate::app::Commands;
 use crate::complete::Desktop;
+use crate::config::Config;
 use crate::list::file_kind;
-use crate::{PropertiesWindow, format};
+use crate::{PropertiesWindow, format, theme};
 
 /// The open Properties dialogs.
 pub struct PropertiesDialogs {
     commands: Rc<dyn Commands>,
     desktop: Rc<dyn Desktop>,
+    config: Rc<Config>,
     windows: RefCell<BTreeMap<DownloadId, PropertiesWindow>>,
 }
 
 impl PropertiesDialogs {
     /// Creates the dialog manager.
-    pub fn new(commands: Rc<dyn Commands>, desktop: Rc<dyn Desktop>) -> Rc<Self> {
+    pub fn new(
+        commands: Rc<dyn Commands>,
+        desktop: Rc<dyn Desktop>,
+        config: Rc<Config>,
+    ) -> Rc<Self> {
         Rc::new(Self {
             commands,
             desktop,
+            config,
             windows: RefCell::default(),
         })
     }
@@ -36,6 +43,7 @@ impl PropertiesDialogs {
             return window.show();
         }
         let window = PropertiesWindow::new()?;
+        theme::apply(&window, self.config.settings().appearance);
         let editable = !download.is_running() && download.state != DownloadState::Complete;
         window.set_file_name(download.file_name.as_str().into());
         window.set_location(download.save_dir.to_string_lossy().as_ref().into());
@@ -126,8 +134,11 @@ mod tests {
     fn dialogs() -> (Rc<PropertiesDialogs>, Recorder) {
         i_slint_backend_testing::init_no_event_loop();
         let recorder = Recorder::default();
-        let dialogs =
-            PropertiesDialogs::new(Rc::new(recorder.clone()), Rc::new(FakeDesktop::default()));
+        let dialogs = PropertiesDialogs::new(
+            Rc::new(recorder.clone()),
+            Rc::new(FakeDesktop::default()),
+            Rc::new(Config::new(Default::default(), None, "/d".into())),
+        );
         (dialogs, recorder)
     }
 

@@ -11,10 +11,12 @@ mod complete;
 mod config;
 mod format;
 mod list;
+mod options;
 mod progress;
 mod properties;
 #[cfg(test)]
 mod snapshot;
+mod theme;
 mod toolbar;
 
 use std::rc::Rc;
@@ -30,6 +32,7 @@ use crate::app::{App, Commands};
 use crate::bridge::{Bridge, BridgeConfig};
 use crate::complete::{Desktop, SystemDesktop};
 use crate::config::Config;
+use crate::options::OptionsDialog;
 
 slint::include_modules!();
 
@@ -77,13 +80,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (ui, app) = create_window(config.clone(), commands.clone(), Rc::new(SystemDesktop))?;
     app.apply(downloads.into_iter().map(EngineEvent::Added));
     let bridge = Rc::new(bridge);
-    let adder = Adder::new(config.clone(), commands, bridge.clone());
-    let shown = Rc::downgrade(&app);
+    let adder = Adder::new(config.clone(), commands.clone(), bridge.clone());
+    let (shown, show_config) = (Rc::downgrade(&app), config.clone());
     adder.on_started(move |id| {
         if let Some(app) = shown.upgrade()
-            && config.settings().show_progress_dialog
+            && show_config.settings().show_progress_dialog
         {
             app.show_progress(id);
+        }
+    });
+    let options = OptionsDialog::new(
+        config.clone(),
+        commands.clone(),
+        dirs.downloads().to_path_buf(),
+        dirs.parts().to_path_buf(),
+    );
+    let main = ui.as_weak();
+    options.on_saved(move |settings| {
+        if let Some(ui) = main.upgrade() {
+            theme::apply(&ui, settings.appearance);
+        }
+    });
+    ui.on_options(move || {
+        if let Err(error) = options.open() {
+            eprintln!("velo: couldn't open Options: {error}");
         }
     });
     ui.on_add_url(move || {
@@ -266,6 +286,21 @@ mod tests {
         properties.set_kind(FileKind::Video);
         properties.set_editable(true);
         snapshot::save(&window, &properties, 560, 260, &dir.join("properties.png"));
+        properties.hide().unwrap();
+
+        let options = OptionsWindow::new().unwrap();
+        options.global::<Theme>().invoke_apply(Appearance::Dark);
+        options.set_connection_choices(slint::ModelRc::new(slint::VecModel::from(vec![
+            slint::SharedString::from("8"),
+        ])));
+        options.set_limit_enabled(true);
+        options.set_server_limits(slint::ModelRc::new(slint::VecModel::from(vec![
+            ServerLimit {
+                host: "cdn.example.net".into(),
+                connections: 16,
+            },
+        ])));
+        snapshot::save(&window, &options, 640, 480, &dir.join("options-dark.png"));
     }
 
     /// Six segments of a `total`-byte file in different states, as the planner would leave them.

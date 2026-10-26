@@ -1,0 +1,279 @@
+// The Options dialog. Only settings that do something are here; the rest of IDM's tabs are in
+// the backlog in docs/PLAN.md.
+
+import { Button, CheckBox, ComboBox, LineEdit, ScrollView, SpinBox, TabWidget, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// A category and the folder its downloads go to; empty for the downloads folder.
+export struct CategoryFolder {
+    name: string,
+    folder: string,
+}
+
+// A server with its own connection count.
+export struct ServerLimit {
+    host: string,
+    connections: int,
+}
+
+// A labelled row of the dialog.
+component Labelled inherits HorizontalLayout {
+    in property <string> label;
+    spacing: 8px;
+    Text {
+        width: 160px;
+        text: root.label;
+        vertical-alignment: center;
+        color: Theme.text;
+    }
+    @children
+}
+
+export component OptionsWindow inherits Window {
+    // Save To.
+    in-out property <string> download-dir;
+    in property <string> default-download-dir;
+    in-out property <string> temp-dir;
+    in property <string> default-temp-dir;
+    in property <[CategoryFolder]> category-folders;
+    // Downloads.
+    in-out property <bool> show-progress;
+    in-out property <bool> show-complete;
+    in-out property <string> user-agent;
+    in property <string> default-user-agent;
+    // Connection.
+    in property <[string]> connection-choices;
+    in-out property <int> connections-index;
+    in-out property <bool> limit-enabled;
+    in-out property <int> limit-kb: 1024;
+    in property <[ServerLimit]> server-limits;
+    in-out property <string> new-host;
+    in-out property <int> new-host-index;
+    // Proxy: 0 none, 1 system, 2 manual.
+    in-out property <int> proxy-mode;
+    in-out property <string> proxy-url;
+    // Appearance: 0 system, 1 light, 2 dark.
+    in-out property <int> appearance;
+    // Why the settings can't be saved, if they can't.
+    in property <string> error;
+
+    callback browse-download-dir();
+    callback browse-temp-dir();
+    callback category-folder-edited(index: int, folder: string);
+    callback browse-category-folder(index: int);
+    callback add-server-limit();
+    callback remove-server-limit(index: int);
+    callback accepted();
+    callback cancelled();
+
+    title: "Options";
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 640px;
+    preferred-height: 480px;
+    min-width: 520px;
+    min-height: 400px;
+    background: Theme.window;
+
+    VerticalBox {
+        TabWidget {
+            vertical-stretch: 1;
+            Tab {
+                title: "Save To";
+                VerticalBox {
+                    alignment: start;
+                    Labelled {
+                        label: "Downloads folder:";
+                        LineEdit {
+                            text <=> root.download-dir;
+                            placeholder-text: root.default-download-dir;
+                        }
+                        Button {
+                            text: "…";
+                            clicked => { root.browse-download-dir(); }
+                        }
+                    }
+                    Labelled {
+                        label: "Temporary folder:";
+                        LineEdit {
+                            text <=> root.temp-dir;
+                            placeholder-text: root.default-temp-dir;
+                        }
+                        Button {
+                            text: "…";
+                            clicked => { root.browse-temp-dir(); }
+                        }
+                    }
+                    Text {
+                        text: "A new temporary folder applies after Velo restarts; downloads partly saved in the old one start over.";
+                        wrap: word-wrap;
+                        color: Theme.text-muted;
+                    }
+                    Text {
+                        text: "Folder for each category (empty: the downloads folder):";
+                        color: Theme.text;
+                    }
+                    for row[index] in root.category-folders: Labelled {
+                        label: row.name;
+                        LineEdit {
+                            text: row.folder;
+                            placeholder-text: root.download-dir != "" ? root.download-dir : root.default-download-dir;
+                            edited(text) => { root.category-folder-edited(index, text); }
+                        }
+                        Button {
+                            text: "…";
+                            clicked => { root.browse-category-folder(index); }
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: "Downloads";
+                VerticalBox {
+                    alignment: start;
+                    CheckBox {
+                        text: "Show the progress dialog when a download starts";
+                        checked <=> root.show-progress;
+                    }
+                    CheckBox {
+                        text: "Show the Download complete dialog";
+                        checked <=> root.show-complete;
+                    }
+                    Labelled {
+                        label: "User agent:";
+                        LineEdit {
+                            text <=> root.user-agent;
+                            placeholder-text: root.default-user-agent;
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: "Connection";
+                VerticalBox {
+                    alignment: start;
+                    Labelled {
+                        label: "Connections per download:";
+                        ComboBox {
+                            model: root.connection-choices;
+                            current-index <=> root.connections-index;
+                        }
+                        Rectangle { }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        CheckBox {
+                            text: "Limit the total speed to";
+                            checked <=> root.limit-enabled;
+                        }
+                        SpinBox {
+                            width: 120px;
+                            minimum: 1;
+                            maximum: 1000000;
+                            value <=> root.limit-kb;
+                            enabled: root.limit-enabled;
+                        }
+                        Text {
+                            text: "KB/sec";
+                            vertical-alignment: center;
+                            color: root.limit-enabled ? Theme.text : Theme.text-disabled;
+                        }
+                        Rectangle { }
+                    }
+                    Text {
+                        text: "Servers with their own connection count (also covers their subdomains):";
+                        color: Theme.text;
+                    }
+                    for row[index] in root.server-limits: HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: row.host;
+                            vertical-alignment: center;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: row.connections + " connections";
+                            vertical-alignment: center;
+                            color: Theme.text-muted;
+                        }
+                        Rectangle { }
+                        Button {
+                            text: "Remove";
+                            clicked => { root.remove-server-limit(index); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            text <=> root.new-host;
+                            placeholder-text: "example.com";
+                        }
+                        ComboBox {
+                            width: 80px;
+                            model: root.connection-choices;
+                            current-index <=> root.new-host-index;
+                        }
+                        Button {
+                            text: "Add";
+                            enabled: root.new-host != "";
+                            clicked => { root.add-server-limit(); }
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: "Proxy";
+                VerticalBox {
+                    alignment: start;
+                    Labelled {
+                        label: "Connect:";
+                        ComboBox {
+                            model: ["Directly, without a proxy", "Through the system's proxy", "Through this proxy:"];
+                            current-index <=> root.proxy-mode;
+                        }
+                    }
+                    Labelled {
+                        label: "Proxy:";
+                        LineEdit {
+                            text <=> root.proxy-url;
+                            enabled: root.proxy-mode == 2;
+                            placeholder-text: "http://host:port or socks5://host:port";
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: "Appearance";
+                VerticalBox {
+                    alignment: start;
+                    Labelled {
+                        label: "Theme:";
+                        ComboBox {
+                            model: ["System", "Light", "Dark"];
+                            current-index <=> root.appearance;
+                        }
+                        Rectangle { }
+                    }
+                }
+            }
+        }
+
+        if root.error != "": Text {
+            text: root.error;
+            wrap: word-wrap;
+            color: Theme.danger;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "OK";
+                primary: true;
+                clicked => { root.accepted(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancelled(); }
+            }
+        }
+    }
+}

@@ -8,8 +8,9 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 use velo_core::{Download, DownloadId, DownloadState, SegmentState};
 
 use crate::app::Commands;
+use crate::config::Config;
 use crate::list::DownloadTable;
-use crate::{ConnectionRow, ProgressWindow, SegmentView, format};
+use crate::{ConnectionRow, ProgressWindow, SegmentView, format, theme};
 
 /// What a download's progress dialog lets the user choose besides pausing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,7 @@ impl Default for DownloadOptions {
 /// The open progress dialogs, and the options chosen in them for this session.
 pub struct ProgressDialogs {
     commands: Rc<dyn Commands>,
+    config: Rc<Config>,
     /// Options per download; downloads not here use the defaults.
     options: RefCell<HashMap<DownloadId, DownloadOptions>>,
     /// Each open dialog, and whether its download has been in the table yet: a dialog opened
@@ -47,9 +49,10 @@ pub struct ProgressDialogs {
 
 impl ProgressDialogs {
     /// Creates the dialog manager; dialogs send their commands to `commands`.
-    pub fn new(commands: Rc<dyn Commands>) -> Rc<Self> {
+    pub fn new(commands: Rc<dyn Commands>, config: Rc<Config>) -> Rc<Self> {
         Rc::new(Self {
             commands,
+            config,
             options: RefCell::default(),
             windows: RefCell::default(),
         })
@@ -65,6 +68,7 @@ impl ProgressDialogs {
             return window.show();
         }
         let window = ProgressWindow::new()?;
+        theme::apply(&window, self.config.settings().appearance);
         let options = self.options_for(id);
         window.set_limit_enabled(options.limit_kb.is_some());
         if let Some(kb) = options.limit_kb {
@@ -296,7 +300,11 @@ mod tests {
     fn dialogs() -> (Rc<ProgressDialogs>, Recorder) {
         i_slint_backend_testing::init_no_event_loop();
         let recorder = Recorder::default();
-        (ProgressDialogs::new(Rc::new(recorder.clone())), recorder)
+        let config = Rc::new(Config::new(Default::default(), None, "/d".into()));
+        (
+            ProgressDialogs::new(Rc::new(recorder.clone()), config),
+            recorder,
+        )
     }
 
     /// A running 1000-byte download with two connections, the first further along.
