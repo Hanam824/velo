@@ -71,7 +71,10 @@ impl App {
     }
 
     /// Updates the table from an engine event and redraws.
-    #[cfg_attr(not(test), expect(dead_code, reason = "fed by the engine bridge in D13"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "fed by the engine bridge in D13")
+    )]
     pub fn apply(&self, event: EngineEvent) {
         {
             let mut table = self.table.borrow_mut();
