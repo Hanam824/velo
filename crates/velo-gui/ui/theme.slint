@@ -17,6 +17,12 @@ export global Theme {
     out property <brush> text-muted: dark ? #9da7b3 : #59636e;
     out property <brush> border: Palette.border;
     out property <brush> icon: dark ? #c9d1d9 : #3d444d;
+    out property <brush> text-disabled: dark ? #6e7681 : #8c959f;
+
+    // Interaction states for Velo's own controls (toolbar buttons, tree and list rows).
+    out property <brush> hover: dark ? #ffffff14 : #0000000d;
+    out property <brush> pressed: dark ? #ffffff24 : #0000001a;
+    out property <brush> selection: dark ? #4493f840 : #1f6feb26;
 
     // Brand and status colours.
     out property <brush> accent: dark ? #4493f8 : #1f6feb;
