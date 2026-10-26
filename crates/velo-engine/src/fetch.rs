@@ -10,9 +10,10 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio_util::sync::CancellationToken;
 
 use crate::probe::content_range_start;
-use crate::{Error, Result};
+use crate::{Error, Limiter, Result};
 
-/// Downloads bytes `[start, end)` of `url` into `part_path`, appending after the bytes the part
+/// Downloads bytes `[start, end)` of `url`, where `range` is `(start, end)`, into `part_path`,
+/// appending after the bytes the part
 /// file already holds, and returns the part file's final length.
 ///
 /// The part file's size on disk is the source of truth for progress: a part file holding `n`
@@ -21,18 +22,20 @@ use crate::{Error, Result};
 /// offset 0, or has an `end`, is a range request and needs a matching `206` answer; for a server
 /// without range support, pass `start` 0, `end` `None` and an empty part file.
 ///
-/// `on_progress` is called with the number of bytes written after each chunk. Returns
+/// Every chunk passes each of `limiters` first. `on_progress` is called with the number of
+/// bytes written after each chunk. Returns
 /// [`Error::Incomplete`] if the connection ends early, and [`Error::Cancelled`] once `cancel` is
 /// cancelled; the bytes received so far stay in the part file for the next attempt.
 pub async fn fetch_range(
     client: &Client,
     url: &Url,
     part_path: &Path,
-    start: u64,
-    end: Option<u64>,
+    range: (u64, Option<u64>),
+    limiters: &[Limiter],
     cancel: &CancellationToken,
     mut on_progress: impl FnMut(u64),
 ) -> Result<u64> {
+    let (start, end) = range;
     if let Some(dir) = part_path.parent() {
         fs::create_dir_all(dir).await?;
     }
@@ -84,6 +87,17 @@ pub async fn fetch_range(
                 return Err(error);
             }
         };
+        for limiter in limiters {
+            if let Err(error) = cancellable(cancel, async {
+                limiter.acquire(chunk.len() as u64).await;
+                Ok(())
+            })
+            .await
+            {
+                writer.flush().await?;
+                return Err(error);
+            }
+        }
         // A server may send more than asked for; keep only the requested range.
         let take = match expected {
             Some(expected) if end.is_some() => chunk.len().min((expected - have) as usize),

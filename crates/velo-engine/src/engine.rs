@@ -17,7 +17,9 @@ use tokio_util::sync::CancellationToken;
 use velo_core::{Download, DownloadId, DownloadState, EngineEvent, ProgressUpdate};
 
 use crate::download::{RunContext, Stage, remove_dir, run};
-use crate::{Credentials, Error, Options, Progress, Result, client_for};
+use velo_core::Settings;
+
+use crate::{Error, Limiter, Options, Progress, RequestOptions, Result, client_with};
 
 /// How often running downloads report [`EngineEvent::Progress`].
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -29,12 +31,32 @@ const SAVE_EVERY: u64 = 8;
 /// What the engine needs to run downloads.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// The shared HTTP client, from [`client`](crate::client).
-    pub client: Client,
     /// Folder holding each download's part-file folder.
     pub temp_dir: PathBuf,
-    /// Connection and retry settings for downloads started from now on.
-    pub options: Options,
+    /// Connections, segment size, speed limit, user agent and proxy.
+    pub settings: Settings,
+    /// How failed requests are retried.
+    pub retry: RetryPolicy,
+}
+
+/// How a segment is retried after a network error, a cut-off connection or a `408`, `429` or
+/// `5xx` answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Retries for a segment; the count starts over whenever an attempt makes progress.
+    pub max_retries: u32,
+    /// Wait before the first retry; it doubles with each further retry.
+    pub delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        let options = Options::default();
+        Self {
+            max_retries: options.max_retries,
+            delay: options.retry_delay,
+        }
+    }
 }
 
 /// A download to add to the engine.
@@ -52,9 +74,9 @@ pub struct NewDownload {
     pub description: String,
     /// Whether to start it right away; otherwise it waits as queued.
     pub start: bool,
-    /// Sent to the server as Basic authorization. Kept in memory only, so a download that needs
-    /// them can't resume after the app restarts until they are given again.
-    pub credentials: Option<Credentials>,
+    /// Login, referer and cookies to send. Kept in memory only, so a download that needs them
+    /// can't resume after the app restarts until they are given again.
+    pub request: RequestOptions,
 }
 
 /// A handle to the engine task. Cloning it gives another handle to the same engine.
@@ -72,17 +94,24 @@ impl Engine {
     /// Starts the engine task on the current tokio runtime with `downloads` restored from
     /// storage.
     ///
-    /// Downloads that were running when the app last stopped come back paused.
+    /// Downloads that were running when the app last stopped come back paused. Fails if the
+    /// HTTP client can't be built from the settings, such as for a malformed proxy.
     ///
     /// # Panics
     /// If called outside a tokio runtime.
-    pub fn start(config: EngineConfig, downloads: Vec<Download>) -> Self {
+    pub fn start(config: EngineConfig, downloads: Vec<Download>) -> Result<Self> {
+        let client = client_with(&config.settings, &RequestOptions::default())?;
+        let global = Limiter::new(config.settings.speed_limit);
         let next_id = downloads.iter().map(|d| d.id.0 + 1).max().unwrap_or(1);
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(1024);
         let (task_tx, task_rx) = mpsc::unbounded_channel();
         let actor = Actor {
             config,
+            client,
+            global,
+            limiters: HashMap::new(),
+            requests: HashMap::new(),
             downloads: downloads
                 .into_iter()
                 .map(|mut download| {
@@ -94,15 +123,14 @@ impl Engine {
                 .collect(),
             events: events.clone(),
             task_tx,
-            clients: HashMap::new(),
             shutdown: Vec::new(),
         };
         tokio::spawn(actor.run(command_rx, task_rx));
-        Self {
+        Ok(Self {
             commands,
             events,
             next_id: Arc::new(AtomicU64::new(next_id)),
-        }
+        })
     }
 
     /// Returns a receiver for everything that happens from now on.
@@ -120,7 +148,7 @@ impl Engine {
         download.category = new.category;
         download.description = new.description;
         download.added_at = Some(now());
-        self.send(Command::Add(Box::new(download), new.start, new.credentials));
+        self.send(Command::Add(Box::new(download), new.start, new.request));
         id
     }
 
@@ -144,9 +172,17 @@ impl Engine {
         self.send(Command::Delete { id, delete_file });
     }
 
-    /// Uses `options` for downloads started from now on.
-    pub fn set_options(&self, options: Options) {
-        self.send(Command::SetOptions(options));
+    /// Uses `settings` from now on. The speed limit applies at once; connection counts apply to
+    /// downloads started afterwards. A client that can't be built from them, such as for a
+    /// malformed proxy, keeps the old one.
+    pub fn set_settings(&self, settings: Settings) {
+        self.send(Command::SetSettings(Box::new(settings)));
+    }
+
+    /// Limits download `id` to `rate` bytes per second, on top of the global limit; `None`
+    /// removes its own limit. Applies at once, also while it runs.
+    pub fn set_speed_limit(&self, id: DownloadId, rate: Option<u64>) {
+        self.send(Command::SetSpeedLimit(id, rate));
     }
 
     /// Sends [`EngineEvent::Changed`] for every download.
@@ -171,12 +207,13 @@ impl Engine {
 /// A request from an [`Engine`] handle.
 #[derive(Debug)]
 enum Command {
-    Add(Box<Download>, bool, Option<Credentials>),
+    Add(Box<Download>, bool, RequestOptions),
     Resume(DownloadId),
     Pause(DownloadId),
     PauseAll,
     Delete { id: DownloadId, delete_file: bool },
-    SetOptions(Options),
+    SetSettings(Box<Settings>),
+    SetSpeedLimit(DownloadId, Option<u64>),
     Resync,
     Shutdown(oneshot::Sender<()>),
 }
@@ -195,8 +232,14 @@ struct Actor {
     downloads: BTreeMap<DownloadId, Entry>,
     events: broadcast::Sender<EngineEvent>,
     task_tx: mpsc::UnboundedSender<TaskMessage>,
-    /// Clients that send a download's credentials, by download; others use the shared client.
-    clients: HashMap<DownloadId, Client>,
+    /// The client for downloads without request options of their own.
+    client: Client,
+    /// The global speed limit.
+    global: Limiter,
+    /// Each download's own speed limit, created when first needed.
+    limiters: HashMap<DownloadId, Limiter>,
+    /// Downloads' request options and the clients that send them.
+    requests: HashMap<DownloadId, (RequestOptions, Client)>,
     /// Waiting [`Engine::shutdown`] calls; once set, the engine ends when nothing runs.
     shutdown: Vec<oneshot::Sender<()>>,
 }
@@ -267,15 +310,15 @@ impl Actor {
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Add(download, start, credentials) => {
+            Command::Add(download, start, request) => {
                 let download = *download;
                 let id = download.id;
-                if let Some(credentials) = credentials {
-                    match client_for(Some(&credentials)) {
+                if !request.is_empty() {
+                    match client_with(&self.config.settings, &request) {
                         Ok(client) => {
-                            self.clients.insert(id, client);
+                            self.requests.insert(id, (request, client));
                         }
-                        Err(error) => eprintln!("velo: couldn't set up authorization: {error}"),
+                        Err(error) => eprintln!("velo: couldn't set up the request: {error}"),
                     }
                 }
                 self.emit(EngineEvent::Added(download.clone()));
@@ -307,7 +350,8 @@ impl Actor {
                     None => self.remove(id, delete_file),
                 }
             }
-            Command::SetOptions(options) => self.config.options = options,
+            Command::SetSettings(settings) => self.set_settings(*settings),
+            Command::SetSpeedLimit(id, rate) => self.limiter(id).set_rate(rate),
             Command::Resync => {
                 let all: Vec<_> = self
                     .downloads
@@ -328,9 +372,10 @@ impl Actor {
     /// Starts a task for download `id`, unless it is running, complete or the engine is
     /// shutting down.
     fn start(&mut self, id: DownloadId) {
-        if !self.shutdown.is_empty() {
+        if !self.shutdown.is_empty() || !self.downloads.contains_key(&id) {
             return;
         }
+        let own_limit = self.limiter(id);
         let Some(entry) = self.downloads.get_mut(&id) else {
             return;
         };
@@ -345,9 +390,24 @@ impl Actor {
             rate: RateMeter::default(),
         };
         let mut download = entry.download.clone();
-        let client = self.clients.get(&id).unwrap_or(&self.config.client).clone();
+        let client = match self.requests.get(&id) {
+            Some((_, client)) => client.clone(),
+            None => self.client.clone(),
+        };
         let temp_dir = self.config.temp_dir.clone();
-        let (options, progress) = (self.config.options.clone(), running.progress.clone());
+        let host = reqwest::Url::parse(&entry.download.url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .unwrap_or_default();
+        let settings = &self.config.settings;
+        let options = Options {
+            max_connections: settings.connections_for(&host),
+            min_segment_size: settings.min_segment_size,
+            max_retries: self.config.retry.max_retries,
+            retry_delay: self.config.retry.delay,
+            limiters: vec![self.global.clone(), own_limit],
+        };
+        let progress = running.progress.clone();
         let (cancel, tx) = (running.cancel.clone(), self.task_tx.clone());
         entry.running = Some(running);
         let snapshot = entry.download.clone();
@@ -433,7 +493,8 @@ impl Actor {
         let Some(entry) = self.downloads.remove(&id) else {
             return;
         };
-        self.clients.remove(&id);
+        self.requests.remove(&id);
+        self.limiters.remove(&id);
         let parts = self.config.temp_dir.join(id.0.to_string());
         let file =
             (delete_file && entry.download.is_finished()).then(|| entry.download.save_path());
@@ -444,6 +505,29 @@ impl Actor {
             }
         });
         self.emit(EngineEvent::Removed(id));
+    }
+
+    /// Uses `settings` from now on: rebuilds the clients and sets the global speed limit.
+    fn set_settings(&mut self, settings: Settings) {
+        match client_with(&settings, &RequestOptions::default()) {
+            Ok(client) => self.client = client,
+            Err(error) => {
+                eprintln!("velo: keeping the old connection settings: {error}");
+                return;
+            }
+        }
+        for (request, client) in self.requests.values_mut() {
+            if let Ok(new) = client_with(&settings, request) {
+                *client = new;
+            }
+        }
+        self.global.set_rate(settings.speed_limit);
+        self.config.settings = settings;
+    }
+
+    /// Download `id`'s own speed limit, created without a limit if it has none yet.
+    fn limiter(&mut self, id: DownloadId) -> Limiter {
+        self.limiters.entry(id).or_default().clone()
     }
 
     /// Sends `event` to every subscriber; having none is fine.

@@ -17,6 +17,8 @@
 //! - `/bump`: moves `/versioned` to the next version.
 //! - `/auth/{name}`: like `/files`, but only with Basic authorization for [`USER`] and
 //!   [`PASSWORD`]; `401` otherwise.
+//! - `/headers/{name}`: like `/files`, but only with `Referer` [`REFERER`] and `Cookie`
+//!   [`COOKIES`]; `403` otherwise.
 //! - anything else: `404`.
 
 #![allow(dead_code)]
@@ -28,8 +30,8 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::header::{
-    ACCEPT_RANGES, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG,
-    LAST_MODIFIED, LOCATION, RANGE,
+    ACCEPT_RANGES, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, COOKIE, ETAG,
+    LAST_MODIFIED, LOCATION, RANGE, REFERER as REFERER_HEADER,
 };
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::routing::get;
@@ -42,6 +44,12 @@ pub const USER: &str = "velo";
 
 /// Password `/auth` accepts.
 pub const PASSWORD: &str = "s3cret pass";
+
+/// `Referer` that `/headers` needs.
+pub const REFERER: &str = "https://example.test/page";
+
+/// `Cookie` that `/headers` needs.
+pub const COOKIES: &str = "session=abc; theme=dark";
 
 /// `ETag` of the files under `/files`.
 pub const ETAG_VALUE: &str = "\"v1\"";
@@ -181,6 +189,20 @@ pub async fn start() -> String {
                 let expected = "Basic dmVsbzpzM2NyZXQgcGFzcw==";
                 if headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) != Some(expected) {
                     return status(StatusCode::UNAUTHORIZED);
+                }
+                serve(&method, &headers, &body(), true, &[])
+            }),
+        )
+        .route(
+            "/headers/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                let header = |name| {
+                    headers
+                        .get(name)
+                        .and_then(|v: &axum::http::HeaderValue| v.to_str().ok())
+                };
+                if header(REFERER_HEADER) != Some(REFERER) || header(COOKIE) != Some(COOKIES) {
+                    return status(StatusCode::FORBIDDEN);
                 }
                 serve(&method, &headers, &body(), true, &[])
             }),

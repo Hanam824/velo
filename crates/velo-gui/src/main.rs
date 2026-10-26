@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use velo_core::{EngineEvent, Settings};
-use velo_engine::Options;
+use velo_engine::RetryPolicy;
 use velo_platform::AppDirs;
 use velo_store::Store;
 
@@ -56,7 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .temp_dir
             .clone()
             .unwrap_or_else(|| dirs.parts().to_path_buf()),
-        options: Options::from_settings(&settings),
+        settings: settings.clone(),
+        retry: RetryPolicy::default(),
         store,
         downloads: downloads.clone(),
     })?;

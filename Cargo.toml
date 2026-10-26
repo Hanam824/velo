@@ -28,7 +28,7 @@ proptest = "1"
 # Native file dialogs; on Linux through the XDG desktop portal, so no GTK is needed.
 rfd = "0.17"
 # rustls with the ring provider: the default aws-lc provider carries the OpenSSL license, which deny.toml doesn't allow.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "socks", "system-proxy"] }
 # SQLite compiled in, so every platform has the same version.
 rusqlite = { version = "0.41", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

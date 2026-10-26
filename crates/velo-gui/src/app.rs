@@ -263,7 +263,7 @@ pub mod tests {
 
     impl Commands for Recorder {
         fn add(&self, new: NewDownload) -> DownloadId {
-            let user = new.credentials.map(|c| c.user).unwrap_or_default();
+            let user = new.request.credentials.map(|c| c.user).unwrap_or_default();
             self.0.borrow_mut().push(format!(
                 "add {} {} {} {} start={} user={user}",
                 new.url,

@@ -21,6 +21,7 @@ fn options() -> Options {
         min_segment_size: 16 * 1024,
         max_retries: 3,
         retry_delay: Duration::from_millis(5),
+        limiters: Vec::new(),
     }
 }
 

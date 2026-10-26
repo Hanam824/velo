@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
-use velo_engine::{Credentials, NewDownload, Probe, Url, unique_file_name};
+use velo_engine::{Credentials, NewDownload, Probe, RequestOptions, Url, unique_file_name};
 
 use crate::app::Commands;
 use crate::config::Config;
@@ -228,7 +228,10 @@ impl Adder {
             category,
             description: dialog.get_description().into(),
             start,
-            credentials: pending.credentials.clone(),
+            request: RequestOptions {
+                credentials: pending.credentials.clone(),
+                ..RequestOptions::default()
+            },
         });
     }
 
