@@ -20,10 +20,10 @@ use tokio_util::sync::CancellationToken;
 use velo_core::{Segment, SegmentId, SegmentState, Settings};
 
 use crate::fetch::{cancellable, send_range};
-use crate::{Error, Result, planner};
+use crate::{Error, Limiter, Result, planner};
 
 /// How a segmented download runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Options {
     /// Workers, so connections, at most; at least 1.
     pub max_connections: u32,
@@ -34,17 +34,8 @@ pub struct Options {
     pub max_retries: u32,
     /// Wait before the first retry; it doubles with each further retry.
     pub retry_delay: Duration,
-}
-
-impl Options {
-    /// Options from the user's settings, with the default retry policy.
-    pub fn from_settings(settings: &Settings) -> Self {
-        Self {
-            max_connections: settings.max_connections,
-            min_segment_size: settings.min_segment_size,
-            ..Self::default()
-        }
-    }
+    /// Speed limits every chunk must pass, such as the global one and the download's own.
+    pub limiters: Vec<Limiter>,
 }
 
 impl Default for Options {
@@ -55,6 +46,7 @@ impl Default for Options {
             min_segment_size: settings.min_segment_size,
             max_retries: 5,
             retry_delay: Duration::from_secs(1),
+            limiters: Vec::new(),
         }
     }
 }
@@ -292,6 +284,18 @@ impl Worker {
                     return Err(error);
                 }
             };
+            let wanted = (chunk.len() as u64).min(self.progress.update(id, |s| s.remaining()));
+            for limiter in &self.options.limiters {
+                if let Err(error) = cancellable(&self.stop, async {
+                    limiter.acquire(wanted).await;
+                    Ok(())
+                })
+                .await
+                {
+                    writer.flush().await?;
+                    return Err(error);
+                }
+            }
             let (take, done) = self.progress.update(id, |s| {
                 let take = chunk.len().min(s.remaining() as usize);
                 s.downloaded += take as u64;

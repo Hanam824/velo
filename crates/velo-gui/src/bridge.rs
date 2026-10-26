@@ -13,8 +13,8 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use tokio::sync::{broadcast, oneshot};
-use velo_core::{Download, EngineEvent};
-use velo_engine::{Credentials, Engine, EngineConfig, Options};
+use velo_core::{Download, EngineEvent, Settings};
+use velo_engine::{Credentials, Engine, EngineConfig, RequestOptions, RetryPolicy};
 use velo_store::Store;
 
 use crate::add::{ProbeDone, Prober};
@@ -23,8 +23,10 @@ use crate::add::{ProbeDone, Prober};
 pub struct BridgeConfig {
     /// Folder for part files.
     pub temp_dir: PathBuf,
-    /// Connection and retry settings.
-    pub options: Options,
+    /// Connections, speed limit, user agent and proxy.
+    pub settings: Settings,
+    /// How failed requests are retried.
+    pub retry: RetryPolicy,
     /// The database to keep the download list in.
     pub store: Store,
     /// Downloads restored from the store.
@@ -35,6 +37,8 @@ pub struct BridgeConfig {
 pub struct Bridge {
     engine: Engine,
     runtime: tokio::runtime::Handle,
+    /// The settings probes use for their client.
+    settings: Settings,
     events: mpsc::Receiver<EngineEvent>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
@@ -47,30 +51,35 @@ impl Bridge {
             .enable_all()
             .thread_name("velo-engine")
             .build()?;
-        let client = velo_engine::client().map_err(std::io::Error::other)?;
         let (engine_tx, engine_rx) = mpsc::channel();
         let (events_tx, events) = mpsc::channel();
         let (stop, stopped) = oneshot::channel();
         let handle = runtime.handle().clone();
         let BridgeConfig {
             temp_dir,
-            options,
+            settings,
+            retry,
             store,
             downloads,
         } = config;
+        let engine_settings = settings.clone();
 
         let thread = std::thread::Builder::new()
             .name("velo-runtime".into())
             .spawn(move || {
                 runtime.block_on(async move {
-                    let engine = Engine::start(
-                        EngineConfig {
-                            client,
-                            temp_dir,
-                            options,
-                        },
-                        downloads,
-                    );
+                    let config = EngineConfig {
+                        temp_dir,
+                        settings: engine_settings,
+                        retry,
+                    };
+                    let engine = match Engine::start(config, downloads) {
+                        Ok(engine) => engine,
+                        Err(error) => {
+                            let _ = engine_tx.send(Err(error));
+                            return;
+                        }
+                    };
                     let (persist_stop, persist_stopped) = oneshot::channel();
                     let persist = tokio::spawn(persist(
                         store,
@@ -79,7 +88,7 @@ impl Bridge {
                         persist_stopped,
                     ));
                     tokio::spawn(forward(engine.subscribe(), engine.clone(), events_tx));
-                    let _ = engine_tx.send(engine.clone());
+                    let _ = engine_tx.send(Ok(engine.clone()));
 
                     let _ = stopped.await;
                     // Pause everything; the final Changed events are queued once this returns.
@@ -90,10 +99,12 @@ impl Bridge {
             })?;
         let engine = engine_rx
             .recv()
-            .map_err(|_| std::io::Error::other("the engine thread stopped while starting"))?;
+            .map_err(|_| std::io::Error::other("the engine thread stopped while starting"))?
+            .map_err(std::io::Error::other)?;
         Ok(Self {
             engine,
             runtime: handle,
+            settings,
             events,
             stop: Some(stop),
             thread: Some(thread),
@@ -135,8 +146,13 @@ impl Prober for Bridge {
     fn probe(&self, url: String, credentials: Option<Credentials>, done: ProbeDone) {
         let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
         WAITING.with(|waiting| waiting.borrow_mut().insert(ticket, done));
+        let request = RequestOptions {
+            credentials,
+            ..RequestOptions::default()
+        };
+        let settings = self.settings.clone();
         self.runtime.spawn(async move {
-            let result = match velo_engine::client_for(credentials.as_ref()) {
+            let result = match velo_engine::client_with(&settings, &request) {
                 Ok(client) => velo_engine::probe(&client, &url)
                     .await
                     .map_err(|e| e.to_string()),
@@ -229,9 +245,10 @@ mod tests {
         let database = dir.path().join("velo.db");
         let config = |downloads| BridgeConfig {
             temp_dir: dir.path().join("parts"),
-            options: Options {
+            settings: Settings::default(),
+            retry: RetryPolicy {
                 max_retries: 0,
-                ..Options::default()
+                ..RetryPolicy::default()
             },
             store: Store::open(&database).unwrap(),
             downloads,
@@ -246,7 +263,7 @@ mod tests {
             category: None,
             description: "unreachable".into(),
             start: true,
-            credentials: None,
+            request: RequestOptions::default(),
         });
         wait_for(
             &bridge,

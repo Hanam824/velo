@@ -3,21 +3,23 @@
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
-use velo_core::{DownloadId, Segment};
+use velo_core::{DownloadId, ProxyMode, Segment, Settings};
 
 mod download;
 mod engine;
 mod fetch;
 mod filename;
+mod limiter;
 mod merge;
 pub mod planner;
 mod probe;
 mod segmented;
 
 pub use download::download_file;
-pub use engine::{Engine, EngineConfig, NewDownload};
+pub use engine::{Engine, EngineConfig, NewDownload, RetryPolicy};
 pub use fetch::fetch_range;
 pub use filename::{file_name, sanitize_file_name, unique_file_name};
+pub use limiter::Limiter;
 pub use merge::merge;
 pub use probe::{Probe, probe};
 pub use reqwest::Url;
@@ -72,6 +74,9 @@ pub enum Error {
     /// The download was stopped by its caller.
     #[error("the download was stopped")]
     Cancelled,
+    /// A referer or cookie value can't be sent as an HTTP header.
+    #[error("a header value contains characters HTTP doesn't allow")]
+    InvalidHeader,
     /// Something already exists at the save path.
     #[error("{0} already exists")]
     Exists(PathBuf),
@@ -81,38 +86,82 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Builds the HTTP client the engine shares between requests, so connections to a server are
-/// reused.
+/// reused, with the default settings.
 ///
 /// It verifies certificates against the operating system's trust store, follows redirects and
 /// identifies itself as `Velo/<version>`. Responses are never decompressed, so byte offsets
 /// match the file on the server.
 pub fn client() -> Result<reqwest::Client> {
-    client_for(None)
+    client_with(&Settings::default(), &RequestOptions::default())
 }
 
-/// Builds a client like [`client`] that also sends `credentials`, if any, with every request
-/// as HTTP Basic authorization.
-pub fn client_for(credentials: Option<&Credentials>) -> Result<reqwest::Client> {
+/// Builds a client like [`client`] that uses the user agent and proxy from `settings` and
+/// sends `request`'s headers with every request.
+pub fn client_with(settings: &Settings, request: &RequestOptions) -> Result<reqwest::Client> {
     static PROVIDER: Once = Once::new();
     PROVIDER.call_once(|| {
         // Fails only if another provider is already installed, which is fine too.
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
-    let mut headers = reqwest::header::HeaderMap::new();
-    if let Some(credentials) = credentials {
-        let mut value = credentials.basic_header();
-        value.set_sensitive(true);
-        headers.insert(reqwest::header::AUTHORIZATION, value);
+    let mut builder = reqwest::Client::builder()
+        .user_agent(
+            settings
+                .user_agent
+                .clone()
+                .unwrap_or_else(|| concat!("Velo/", env!("CARGO_PKG_VERSION")).into()),
+        )
+        .default_headers(request.headers()?);
+    builder = match settings.proxy.mode {
+        ProxyMode::None => builder.no_proxy(),
+        ProxyMode::System => builder,
+        ProxyMode::Manual => builder.proxy(reqwest::Proxy::all(&settings.proxy.url)?),
+    };
+    Ok(builder.build()?)
+}
+
+/// Headers a download sends with every request besides the defaults.
+///
+/// The engine keeps these in memory only; they are never written to the download list, since
+/// credentials and cookies are secrets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestOptions {
+    /// Sent as HTTP Basic authorization.
+    pub credentials: Option<Credentials>,
+    /// The page the link came from, sent as `Referer`.
+    pub referer: Option<String>,
+    /// Sent as the `Cookie` header, such as `a=1; b=2`.
+    pub cookies: Option<String>,
+}
+
+impl RequestOptions {
+    /// Whether no header is set, so the shared client will do.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
     }
-    Ok(reqwest::Client::builder()
-        .user_agent(concat!("Velo/", env!("CARGO_PKG_VERSION")))
-        .default_headers(headers)
-        .build()?)
+
+    /// The headers to send; secrets are marked sensitive so they never show in logs.
+    fn headers(&self) -> Result<reqwest::header::HeaderMap> {
+        use reqwest::header::{AUTHORIZATION, COOKIE, HeaderValue, REFERER};
+        let mut headers = reqwest::header::HeaderMap::new();
+        let value = |text: &str| HeaderValue::from_str(text).map_err(|_| Error::InvalidHeader);
+        if let Some(credentials) = &self.credentials {
+            let mut header = credentials.basic_header();
+            header.set_sensitive(true);
+            headers.insert(AUTHORIZATION, header);
+        }
+        if let Some(referer) = &self.referer {
+            headers.insert(REFERER, value(referer)?);
+        }
+        if let Some(cookies) = &self.cookies {
+            let mut header = value(cookies)?;
+            header.set_sensitive(true);
+            headers.insert(COOKIE, header);
+        }
+        Ok(headers)
+    }
 }
 
 /// A user name and password for a server that asks for them.
-///
-/// The engine keeps these in memory only; they are never written to the download list.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials {
     /// The user name.
@@ -146,4 +195,64 @@ pub fn part_path(temp_dir: &Path, download: DownloadId, segment: &Segment) -> Pa
     temp_dir
         .join(download.0.to_string())
         .join(segment.part_file_name())
+}
+
+#[cfg(test)]
+mod tests {
+    use velo_core::ProxySettings;
+
+    use super::*;
+
+    #[test]
+    fn clients_build_for_every_proxy_mode_and_reject_a_bad_proxy() {
+        for (mode, url) in [
+            (ProxyMode::None, ""),
+            (ProxyMode::System, ""),
+            (ProxyMode::Manual, "http://127.0.0.1:3128"),
+            (ProxyMode::Manual, "socks5://127.0.0.1:1080"),
+        ] {
+            let settings = Settings {
+                proxy: ProxySettings {
+                    mode,
+                    url: url.into(),
+                },
+                user_agent: Some("Test/1".into()),
+                ..Settings::default()
+            };
+            assert!(
+                client_with(&settings, &RequestOptions::default()).is_ok(),
+                "{mode:?} {url}"
+            );
+        }
+        let bad = Settings {
+            proxy: ProxySettings {
+                mode: ProxyMode::Manual,
+                url: "not a proxy".into(),
+            },
+            ..Settings::default()
+        };
+        assert!(client_with(&bad, &RequestOptions::default()).is_err());
+    }
+
+    #[test]
+    fn request_headers_are_checked_and_secrets_hidden() {
+        let request = RequestOptions {
+            credentials: Some(Credentials {
+                user: "me".into(),
+                password: "pw".into(),
+            }),
+            referer: Some("https://example.test/".into()),
+            cookies: Some("a=1".into()),
+        };
+        let headers = request.headers().unwrap();
+        assert_eq!(headers.len(), 3);
+        assert!(headers[reqwest::header::AUTHORIZATION].is_sensitive());
+        assert!(headers[reqwest::header::COOKIE].is_sensitive());
+        assert!(!format!("{request:?}").contains("pw"));
+        let bad = RequestOptions {
+            referer: Some("line\nbreak".into()),
+            ..RequestOptions::default()
+        };
+        assert!(matches!(bad.headers(), Err(Error::InvalidHeader)));
+    }
 }

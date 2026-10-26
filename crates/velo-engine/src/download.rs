@@ -119,8 +119,8 @@ pub(crate) async fn run(
             context.client,
             &probe.url,
             &part,
-            0,
-            None,
+            (0, None),
+            &context.options.limiters,
             context.cancel,
             |n| {
                 progress.update(SegmentId(0), |s| {

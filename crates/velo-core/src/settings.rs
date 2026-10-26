@@ -26,6 +26,47 @@ pub struct Settings {
     pub categories: Vec<Category>,
     /// Addresses entered in Add URL, newest first, at most [`Settings::URL_HISTORY`].
     pub url_history: Vec<String>,
+    /// Total download speed limit in bytes per second; no limit if unset.
+    pub speed_limit: Option<u64>,
+    /// User agent sent to servers; Velo's own (`Velo/<version>`) if unset.
+    pub user_agent: Option<String>,
+    /// How to reach servers.
+    pub proxy: ProxySettings,
+    /// Connection counts for particular servers, overriding [`Settings::max_connections`].
+    pub connection_limits: Vec<ConnectionLimit>,
+}
+
+/// How Velo connects to servers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyMode {
+    /// Directly, ignoring any system proxy.
+    None,
+    /// Through the proxy the operating system or the environment (`HTTPS_PROXY`…) names.
+    #[default]
+    System,
+    /// Through [`ProxySettings::url`].
+    Manual,
+}
+
+/// Proxy settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxySettings {
+    /// Which proxy to use.
+    pub mode: ProxyMode,
+    /// The proxy for [`ProxyMode::Manual`]: `http://`, `https://` or `socks5://` with host and
+    /// port, such as `socks5://127.0.0.1:1080`.
+    pub url: String,
+}
+
+/// A connection count for one server and its subdomains.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionLimit {
+    /// The server, such as `example.com`; it also covers `dl.example.com`.
+    pub host: String,
+    /// Connections per download from that server, from 1 to [`Settings::MAX_CONNECTIONS`].
+    pub max_connections: u32,
 }
 
 impl Settings {
@@ -43,14 +84,45 @@ impl Settings {
         self.url_history.truncate(Self::URL_HISTORY);
     }
 
+    /// Connections for a download from `host`: the most specific matching
+    /// [`ConnectionLimit`], else [`Settings::max_connections`].
+    pub fn connections_for(&self, host: &str) -> u32 {
+        let host = host.to_ascii_lowercase();
+        self.connection_limits
+            .iter()
+            .filter(|limit| {
+                let rule = limit.host.trim_start_matches('.').to_ascii_lowercase();
+                host == rule || host.ends_with(&format!(".{rule}"))
+            })
+            .max_by_key(|limit| limit.host.len())
+            .map_or(self.max_connections, |limit| limit.max_connections)
+    }
+
     /// Checks that every value is in range.
     pub fn validate(&self) -> Result<()> {
-        if !(1..=Self::MAX_CONNECTIONS).contains(&self.max_connections) {
-            return Err(Error::Invalid(format!(
-                "max_connections must be between 1 and {}, got {}",
-                Self::MAX_CONNECTIONS,
-                self.max_connections
-            )));
+        let connections = std::iter::once(self.max_connections)
+            .chain(self.connection_limits.iter().map(|l| l.max_connections));
+        for count in connections {
+            if !(1..=Self::MAX_CONNECTIONS).contains(&count) {
+                return Err(Error::Invalid(format!(
+                    "connection counts must be between 1 and {}, got {count}",
+                    Self::MAX_CONNECTIONS,
+                )));
+            }
+        }
+        if self.speed_limit == Some(0) {
+            return Err(Error::Invalid(
+                "the speed limit must be greater than 0".into(),
+            ));
+        }
+        if self.proxy.mode == ProxyMode::Manual
+            && !["http://", "https://", "socks5://"]
+                .iter()
+                .any(|scheme| self.proxy.url.starts_with(scheme))
+        {
+            return Err(Error::Invalid(
+                "the proxy must start with http://, https:// or socks5://".into(),
+            ));
         }
         if self.min_segment_size == 0 {
             return Err(Error::Invalid(
@@ -70,6 +142,10 @@ impl Default for Settings {
             download_dir: None,
             categories: Category::defaults(),
             url_history: Vec::new(),
+            speed_limit: None,
+            user_agent: None,
+            proxy: ProxySettings::default(),
+            connection_limits: Vec::new(),
         }
     }
 }
@@ -77,6 +153,64 @@ impl Default for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_limits_cover_subdomains_and_the_most_specific_wins() {
+        let settings = Settings {
+            connection_limits: vec![
+                ConnectionLimit {
+                    host: "example.com".into(),
+                    max_connections: 2,
+                },
+                ConnectionLimit {
+                    host: "cdn.example.com".into(),
+                    max_connections: 16,
+                },
+            ],
+            ..Settings::default()
+        };
+        assert_eq!(settings.connections_for("example.com"), 2);
+        assert_eq!(settings.connections_for("DL.Example.com"), 2);
+        assert_eq!(settings.connections_for("a.cdn.example.com"), 16);
+        assert_eq!(settings.connections_for("notexample.com"), 8);
+        assert_eq!(settings.connections_for("other.org"), 8);
+    }
+
+    #[test]
+    fn speed_limits_proxies_and_server_limits_are_validated() {
+        let bad = [
+            Settings {
+                speed_limit: Some(0),
+                ..Settings::default()
+            },
+            Settings {
+                proxy: ProxySettings {
+                    mode: ProxyMode::Manual,
+                    url: "127.0.0.1:8080".into(),
+                },
+                ..Settings::default()
+            },
+            Settings {
+                connection_limits: vec![ConnectionLimit {
+                    host: "x.org".into(),
+                    max_connections: 0,
+                }],
+                ..Settings::default()
+            },
+        ];
+        for settings in bad {
+            assert!(settings.validate().is_err(), "{settings:?}");
+        }
+        let good = Settings {
+            speed_limit: Some(100 * 1024),
+            proxy: ProxySettings {
+                mode: ProxyMode::Manual,
+                url: "socks5://127.0.0.1:1080".into(),
+            },
+            ..Settings::default()
+        };
+        assert!(good.validate().is_ok());
+    }
 
     #[test]
     fn the_url_history_keeps_the_newest_once() {

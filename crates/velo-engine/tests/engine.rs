@@ -7,24 +7,36 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::sync::broadcast::Receiver;
-use velo_core::{Download, DownloadId, DownloadState, EngineEvent};
-use velo_engine::{Credentials, Engine, EngineConfig, NewDownload, Options, client};
+use velo_core::{ConnectionLimit, Download, DownloadId, DownloadState, EngineEvent, Settings};
+use velo_engine::{Credentials, Engine, EngineConfig, NewDownload, RequestOptions, RetryPolicy};
 
 use support::{SIZE, body, versioned_body};
 
-/// An engine with two connections and fast retries, its temp folder in `root/temp`.
+/// Two connections and small segments.
+fn settings() -> Settings {
+    Settings {
+        max_connections: 2,
+        min_segment_size: 16 * 1024,
+        ..Settings::default()
+    }
+}
+
+/// An engine with [`settings`] and fast retries, its temp folder in `root/temp`.
 fn engine(root: &Path, downloads: Vec<Download>) -> Engine {
+    engine_with(root, settings(), downloads)
+}
+
+/// An engine with `settings` and fast retries, its temp folder in `root/temp`.
+fn engine_with(root: &Path, settings: Settings, downloads: Vec<Download>) -> Engine {
     let config = EngineConfig {
-        client: client().unwrap(),
         temp_dir: root.join("temp"),
-        options: Options {
-            max_connections: 2,
-            min_segment_size: 16 * 1024,
+        settings,
+        retry: RetryPolicy {
             max_retries: 1,
-            retry_delay: Duration::from_millis(5),
+            delay: Duration::from_millis(5),
         },
     };
-    Engine::start(config, downloads)
+    Engine::start(config, downloads).unwrap()
 }
 
 /// A download of `url` into `root/save`, started at once if `start`.
@@ -38,7 +50,7 @@ fn new_download(root: &Path, url: String, start: bool) -> NewDownload {
         category: None,
         description: String::new(),
         start,
-        credentials: None,
+        request: RequestOptions::default(),
     }
 }
 
@@ -265,7 +277,7 @@ async fn credentials_given_when_adding_are_sent_to_the_server() {
     );
 
     let mut new = new_download(root.path(), format!("{base}/auth/data.bin"), true);
-    new.credentials = Some(Credentials {
+    new.request.credentials = Some(Credentials {
         user: support::USER.into(),
         password: support::PASSWORD.into(),
     });
@@ -274,4 +286,106 @@ async fn credentials_given_when_adding_are_sent_to_the_server() {
     assert!(fs::read(finished(&done)).unwrap() == body());
     // Credentials never reach what is saved.
     assert!(!format!("{done:?}").contains(support::PASSWORD));
+}
+
+#[tokio::test]
+async fn the_global_speed_limit_holds_within_ten_percent() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let rate = 100 * 1024;
+    let engine = engine_with(
+        root.path(),
+        Settings {
+            speed_limit: Some(rate),
+            ..settings()
+        },
+        Vec::new(),
+    );
+    let mut events = engine.subscribe();
+    let start = std::time::Instant::now();
+    let id = engine.add(new_download(
+        root.path(),
+        format!("{base}/files/data.bin"),
+        true,
+    ));
+    let done = wait_for_state(&mut events, id, |s| *s == DownloadState::Complete).await;
+    let elapsed = start.elapsed().as_secs_f64();
+    assert!(fs::read(finished(&done)).unwrap() == body());
+    // One second of data passes at once; the rest at the limit.
+    let expected = (SIZE as u64 - rate) as f64 / rate as f64;
+    // Slower machines only add time, so the upper bound is looser.
+    assert!(
+        elapsed > expected * 0.9 && elapsed < expected * 1.3,
+        "{elapsed:.2} s, expected {expected:.2} s"
+    );
+}
+
+#[tokio::test]
+async fn a_download_limit_set_while_running_applies_at_once() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+    let id = engine.add(new_download(
+        root.path(),
+        format!("{base}/files/data.bin"),
+        false,
+    ));
+    // Small enough that the file takes about a second and a half after the first burst.
+    engine.set_speed_limit(id, Some(120 * 1024));
+    let start = std::time::Instant::now();
+    engine.resume(id);
+    wait_for_state(&mut events, id, |s| *s == DownloadState::Complete).await;
+    let elapsed = start.elapsed().as_secs_f64();
+    assert!(elapsed > 1.2, "{elapsed:.2} s");
+}
+
+#[tokio::test]
+async fn a_server_limit_overrides_the_connection_count() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut limited = settings();
+    limited.max_connections = 4;
+    limited.connection_limits = vec![ConnectionLimit {
+        host: "127.0.0.1".into(),
+        max_connections: 1,
+    }];
+    let engine = engine_with(root.path(), limited, Vec::new());
+    let mut events = engine.subscribe();
+    let id = engine.add(new_download(
+        root.path(),
+        format!("{base}/slow/data.bin"),
+        true,
+    ));
+    let done = wait_for_state(&mut events, id, |s| *s == DownloadState::Complete).await;
+    // One connection never splits the file.
+    assert_eq!(done.segments.len(), 1);
+}
+
+#[tokio::test]
+async fn referer_and_cookies_are_sent() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+    let mut new = new_download(root.path(), format!("{base}/headers/data.bin"), true);
+    new.request.referer = Some(support::REFERER.into());
+    new.request.cookies = Some(support::COOKIES.into());
+    let id = engine.add(new);
+    let done = wait_for_state(&mut events, id, |s| *s == DownloadState::Complete).await;
+    assert!(fs::read(finished(&done)).unwrap() == body());
+
+    let plain = engine.add(new_download(
+        root.path(),
+        format!("{base}/headers/data.bin"),
+        true,
+    ));
+    let failed = wait_for_state(&mut events, plain, |s| {
+        matches!(s, DownloadState::Failed(_))
+    })
+    .await;
+    assert_eq!(
+        failed.state,
+        DownloadState::Failed("server answered 403 Forbidden".into())
+    );
 }
