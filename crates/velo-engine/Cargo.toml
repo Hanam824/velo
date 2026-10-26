@@ -22,6 +22,7 @@ tokio-util.workspace = true
 axum.workspace = true
 futures-util.workspace = true
 proptest.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util"] }
 
