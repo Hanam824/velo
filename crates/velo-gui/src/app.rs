@@ -13,6 +13,7 @@ use velo_engine::{Engine, NewDownload};
 
 use crate::categories::CategoryTree;
 use crate::list::{Column, DownloadTable};
+use crate::progress::ProgressDialogs;
 use crate::toolbar::ToolbarState;
 use crate::{AppWindow, CategoryItem, DownloadRow, format};
 
@@ -60,6 +61,7 @@ pub struct App {
     rows: Rc<VecModel<DownloadRow>>,
     tree: RefCell<CategoryTree>,
     category_rows: Rc<VecModel<CategoryItem>>,
+    progress: Rc<ProgressDialogs>,
 }
 
 impl App {
@@ -68,6 +70,7 @@ impl App {
         let tree = CategoryTree::new(&settings.categories);
         let app = Rc::new(Self {
             ui: ui.as_weak(),
+            progress: ProgressDialogs::new(commands.clone()),
             commands,
             table: RefCell::default(),
             rows: Rc::new(VecModel::default()),
@@ -118,6 +121,7 @@ impl App {
                 app.commands.delete(id, delete_file);
             }
         });
+        ui.on_download_activated(on_row(self, App::show_progress));
         ui.on_delete_confirmed(move |raw, delete_file| confirmed((raw, delete_file)));
     }
 
@@ -132,6 +136,19 @@ impl App {
             download.file_name.into(),
             download.state == DownloadState::Complete,
         );
+    }
+
+    /// Opens download `id`'s progress dialog.
+    pub fn show_progress(&self, id: DownloadId) {
+        if let Err(error) = self.progress.open(id, &self.table.borrow()) {
+            eprintln!("velo: couldn't open the progress dialog: {error}");
+        }
+    }
+
+    /// Download `id`'s progress dialog, if open.
+    #[cfg(test)]
+    pub fn progress_window(&self, id: DownloadId) -> Option<crate::ProgressWindow> {
+        self.progress.window(id)
     }
 
     /// Removes every complete download from the list, keeping their files.
@@ -208,6 +225,7 @@ impl App {
         });
         let total_rate: u64 = table.downloads().iter().map(|d| table.rate_of(d.id)).sum();
         ui.set_status_summary(format::rate(total_rate).into());
+        self.progress.update(&table);
     }
 }
 
@@ -336,6 +354,22 @@ pub mod tests {
         // Sorting is reflected in the header.
         ui.invoke_sort(0);
         assert_eq!((ui.get_sort_column(), ui.get_sort_ascending()), (0, true));
+    }
+
+    #[test]
+    fn activating_a_row_opens_its_progress_dialog() {
+        let (ui, app, _) = app();
+        app.apply([EngineEvent::Added(sample(
+            4,
+            "a.iso",
+            DownloadState::Paused,
+            5,
+            10,
+        ))]);
+        ui.invoke_download_activated(4);
+        assert!(app.progress.is_open(DownloadId(4)));
+        app.apply([EngineEvent::Removed(DownloadId(4))]);
+        assert!(!app.progress.is_open(DownloadId(4)));
     }
 
     #[test]

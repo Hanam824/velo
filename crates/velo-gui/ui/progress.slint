@@ -1,0 +1,239 @@
+// The progress dialog of one download: its status, a progress bar, and in the details the
+// segment bar and a row per connection, as in the IDM layout.
+
+import { Button, ProgressIndicator, TabWidget, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// One segment for the segment bar, as fractions of the whole file.
+export struct SegmentView {
+    // Where the segment starts.
+    start: float,
+    // How much of the file this segment has downloaded.
+    done: float,
+}
+
+// One row of the connections table.
+export struct ConnectionRow {
+    number: int,
+    downloaded: string,
+    info: string,
+}
+
+// The whole file as a bar: downloaded parts in the done colour, the rest plain, and a tick
+// where each connection's segment starts.
+export component SegmentBar inherits Rectangle {
+    in property <[SegmentView]> segments;
+
+    height: 18px;
+    background: Theme.segment-remaining;
+    border-color: Theme.border;
+    border-width: 1px;
+    clip: true;
+
+    for segment in root.segments: Rectangle {
+        x: 1px + segment.start * (root.width - 2px);
+        y: 1px;
+        width: segment.done * (root.width - 2px);
+        height: root.height - 2px;
+        background: Theme.segment-done;
+    }
+    for segment in root.segments: Rectangle {
+        x: 1px + segment.start * (root.width - 2px);
+        y: 1px;
+        width: 2px;
+        height: root.height - 2px;
+        background: Theme.segment-start;
+    }
+}
+
+// A label and its value in the status grid.
+component Field inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <brush> value-color: Theme.text;
+    spacing: 8px;
+    Text {
+        width: 130px;
+        text: root.label;
+        color: Theme.text-muted;
+    }
+    Text {
+        text: root.value;
+        overflow: elide;
+        color: root.value-color;
+    }
+}
+
+export component ProgressWindow inherits Window {
+    in property <string> window-title;
+    in property <string> url;
+    in property <string> status;
+    in property <bool> failed;
+    in property <string> size;
+    in property <string> downloaded;
+    in property <string> rate;
+    in property <string> time-left;
+    in property <string> resume-capability;
+    // 0 to 1; below 0 when the size is unknown.
+    in property <float> progress;
+    in property <bool> running;
+    in property <bool> can-resume;
+    in property <[SegmentView]> segments;
+    in property <[ConnectionRow]> connections;
+    in-out property <bool> show-details: true;
+
+    callback pause();
+    callback resume();
+    // Stops the download and closes the dialog.
+    callback cancel();
+
+    title: root.window-title;
+    icon: @image-url("../../../assets/icons/velo.svg");
+    preferred-width: 560px;
+    min-width: 460px;
+    background: Theme.window;
+
+    VerticalBox {
+        alignment: start;
+        TabWidget {
+            Tab {
+                title: "Download status";
+                VerticalBox {
+                    alignment: start;
+                    Text {
+                        text: root.url;
+                        overflow: elide;
+                        color: Theme.text-muted;
+                    }
+                    Field {
+                        label: "Status";
+                        value: root.status;
+                        value-color: root.failed ? Theme.danger : Theme.text;
+                    }
+                    Field {
+                        label: "File size";
+                        value: root.size;
+                    }
+                    Field {
+                        label: "Downloaded";
+                        value: root.downloaded;
+                    }
+                    Field {
+                        label: "Transfer rate";
+                        value: root.rate;
+                    }
+                    Field {
+                        label: "Time left";
+                        value: root.time-left;
+                    }
+                    Field {
+                        label: "Resume capability";
+                        value: root.resume-capability;
+                    }
+                    ProgressIndicator {
+                        progress: max(0, root.progress);
+                        indeterminate: root.running && root.progress < 0;
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: root.show-details ? "<< Hide details" : "Show details >>";
+                clicked => { root.show-details = !root.show-details; }
+            }
+            Rectangle { }
+            if root.running: Button {
+                text: "Pause";
+                clicked => { root.pause(); }
+            }
+            if !root.running && root.can-resume: Button {
+                text: "Resume";
+                primary: true;
+                clicked => { root.resume(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+        }
+
+        if root.show-details: VerticalLayout {
+            alignment: start;
+            spacing: 6px;
+            Text {
+                text: "Start positions and download progress by connections";
+                color: Theme.text-muted;
+            }
+            SegmentBar {
+                segments: root.segments;
+            }
+            Rectangle {
+                height: 140px;
+                border-color: Theme.border;
+                border-width: 1px;
+                VerticalLayout {
+                    padding: 1px;
+                    Rectangle {
+                        height: 24px;
+                        background: Theme.panel;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            Text {
+                                width: 48px;
+                                text: "N.";
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                color: Theme.text;
+                            }
+                            Text {
+                                width: 140px;
+                                text: "Downloaded";
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                color: Theme.text;
+                            }
+                            Text {
+                                text: "Info";
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                color: Theme.text;
+                            }
+                        }
+                    }
+                    Flickable {
+                        VerticalLayout {
+                            alignment: start;
+                            for row[index] in root.connections: Rectangle {
+                                height: 22px;
+                                background: Math.mod(index, 2) == 1 ? Theme.stripe : transparent;
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    Text {
+                                        width: 48px;
+                                        text: row.number;
+                                        vertical-alignment: center;
+                                        color: Theme.text;
+                                    }
+                                    Text {
+                                        width: 140px;
+                                        text: row.downloaded;
+                                        vertical-alignment: center;
+                                        color: Theme.text;
+                                    }
+                                    Text {
+                                        text: row.info;
+                                        vertical-alignment: center;
+                                        color: Theme.text-muted;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

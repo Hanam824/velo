@@ -161,7 +161,7 @@ impl DownloadTable {
     }
 
     /// Bytes downloaded so far, live if running.
-    fn downloaded(&self, download: &Download) -> u64 {
+    pub fn downloaded(&self, download: &Download) -> u64 {
         self.progress
             .get(&download.id)
             .map_or_else(|| download.downloaded(), |p| p.downloaded)
@@ -172,13 +172,21 @@ impl DownloadTable {
         self.rate_of(download.id)
     }
 
+    /// The segments of `download` as they are now: live while it runs, saved otherwise.
+    pub fn segments<'a>(&'a self, download: &'a Download) -> &'a [velo_core::Segment] {
+        match self.progress.get(&download.id) {
+            Some(progress) if !progress.segments.is_empty() => &progress.segments,
+            _ => &download.segments,
+        }
+    }
+
     /// The current transfer rate of download `id`; 0 unless it is running.
     pub fn rate_of(&self, id: DownloadId) -> u64 {
         self.progress.get(&id).map_or(0, |p| p.rate)
     }
 
     /// How far along the download is, from 0 to 1; complete ones count as 1.
-    fn fraction(&self, download: &Download) -> f64 {
+    pub fn fraction(&self, download: &Download) -> f64 {
         match (
             download.state == DownloadState::Complete,
             download.total_size,
@@ -190,7 +198,7 @@ impl DownloadTable {
     }
 
     /// Seconds until a running download finishes at its current rate.
-    fn time_left(&self, download: &Download) -> Option<u64> {
+    pub fn time_left(&self, download: &Download) -> Option<u64> {
         let rate = self.rate(download);
         let total = download.total_size?;
         (rate > 0).then(|| {
