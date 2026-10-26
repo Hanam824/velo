@@ -1,6 +1,6 @@
 //! User settings that the engine and the app read.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +103,16 @@ impl Settings {
         self.url_history.retain(|u| u != url);
         self.url_history.insert(0, url.to_string());
         self.url_history.truncate(Self::URL_HISTORY);
+    }
+
+    /// The folder files in `category` are saved to: the category's own folder, else
+    /// [`Settings::download_dir`], else `default_downloads` (the system's downloads folder).
+    pub fn save_dir_for(&self, category: Option<&str>, default_downloads: &Path) -> PathBuf {
+        category
+            .and_then(|name| self.categories.iter().find(|c| c.name == name))
+            .and_then(|c| c.save_dir.clone())
+            .or_else(|| self.download_dir.clone())
+            .unwrap_or_else(|| default_downloads.to_path_buf())
     }
 
     /// Connections for a download from `host`: the most specific matching

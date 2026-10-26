@@ -47,7 +47,8 @@ all of the above → velo-gui, velo-cli
 - `velo-core`: domain types (download, segment, category, queue, settings, engine events). No I/O.
 - `velo-engine`: tokio + reqwest. Probes a URL, plans segments (when a worker is idle it splits the segment with the largest remaining range in half), downloads each range into `<temp>/<download id>/<segment id>.part`, then merges the parts in order, checks the size and renames into place. The segment planner is a pure function with property tests.
 - `velo-store`: SQLite (download list and segment state) and TOML (settings).
-- `velo-ipc`: messages between the app, `velo-cli` and (Phase 2) the native-messaging host.
+- `velo-ipc`: messages between the app, `velo-cli` and (Phase 2) the native-messaging host. Each message is one versioned JSON line, answered by one reply line; new message types are additive, and an incompatible change bumps `VERSION`.
+- `velo-cli`: hands its command to the running app over `velo-ipc`; when the app isn't running (or with `--headless`) it runs the engine itself on the app's download list and settings, so the work shows up in the app later.
 - `velo-gui`: Slint UI, compiled from `ui/app.slint` by `build.rs`. Colours come from the `Theme` global (`ui/theme.slint`, light and dark); never hard-code a colour in a component. Icons are in `assets/icons/` (our own app icon plus Lucide, ISC), tinted with `colorize`. Slint is used under its royalty-free license, which requires the `AboutSlint` attribution in the About dialog. UI tests use `i-slint-backend-testing`, pinned to the exact Slint version. The Slint event loop owns the main thread; the engine runs on a tokio runtime in a background thread. Engine work never runs on the UI thread; Slint models aren't `Send`, so the engine sends plain data and the UI applies it via `upgrade_in_event_loop` or a `slint::Timer`.
 
 ## Cross-platform rule

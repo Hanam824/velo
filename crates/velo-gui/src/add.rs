@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
-use velo_core::{DownloadId, Settings};
+use velo_core::{DownloadId, QueueId, Settings};
 use velo_engine::{Credentials, NewDownload, Probe, RequestOptions, Url, unique_file_name};
 
 use crate::app::Commands;
@@ -40,6 +40,16 @@ pub fn is_download_url(text: &str) -> bool {
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
 }
 
+/// Where a download asked for from outside the app (such as by `velo-cli`) should go; what is
+/// left `None` the app chooses as usual.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Preset {
+    /// The folder to save into.
+    pub save_dir: Option<PathBuf>,
+    /// The name to save as.
+    pub file_name: Option<String>,
+}
+
 /// What runs with a download started from Download File Info.
 type OnStarted = Box<dyn Fn(DownloadId)>;
 
@@ -66,6 +76,8 @@ struct Pending {
     server_name: String,
     /// Whether the user changed Save As; then a new category doesn't move the file.
     path_edited: bool,
+    /// The folder and name asked for from outside the app.
+    preset: Preset,
 }
 
 impl Adder {
@@ -121,7 +133,7 @@ impl Adder {
                 password: dialog.get_password().into(),
             });
             let _ = dialog.hide();
-            if let Err(error) = this.open_info(url, credentials) {
+            if let Err(error) = this.open_info(url, credentials, Preset::default()) {
                 eprintln!("velo: couldn't open Download File Info: {error}");
             }
         });
@@ -143,11 +155,13 @@ impl Adder {
         Ok(())
     }
 
-    /// Shows Download File Info for `url` and asks the server about it.
+    /// Shows Download File Info for `url` and asks the server about it; Save As follows
+    /// `preset` where it names a folder or file name.
     pub fn open_info(
         self: &Rc<Self>,
         url: String,
         credentials: Option<Credentials>,
+        preset: Preset,
     ) -> Result<(), slint::PlatformError> {
         let dialog = DownloadInfoDialog::new()?;
         let number = self.next_info.get();
@@ -164,6 +178,7 @@ impl Adder {
             credentials: credentials.clone(),
             server_name: String::new(),
             path_edited: false,
+            preset,
         }));
 
         let (weak, config, state) = (dialog.as_weak(), self.config.clone(), pending.clone());
@@ -171,8 +186,9 @@ impl Adder {
             if let Some(dialog) = weak.upgrade()
                 && !state.borrow().path_edited
             {
-                let dir = config.save_dir(category(&dialog).as_deref());
-                set_save_path(&dialog, &dir, &state.borrow().server_name);
+                let state = state.borrow();
+                let dir = state.dir(&config, category(&dialog).as_deref());
+                set_save_path(&dialog, &dir, state.name());
             }
         });
         let state = pending.clone();
@@ -232,6 +248,41 @@ impl Adder {
         Ok(())
     }
 
+    /// Adds a download of `url` without asking, once the server has said what the file is
+    /// called: into `preset`'s folder, else its category's. It starts at once with `start`, and
+    /// otherwise waits in the main queue.
+    pub fn add_silently(self: &Rc<Self>, url: String, preset: Preset, start: bool) {
+        let this = Rc::downgrade(self);
+        self.prober.probe(
+            url.clone(),
+            self.config.settings(),
+            None,
+            Box::new(move |result| {
+                let Some(this) = this.upgrade() else { return };
+                // If the server didn't answer, the engine tries again and shows the error.
+                let server_name = result.map(|probe| probe.file_name).unwrap_or_default();
+                let name = preset.file_name.clone().unwrap_or(server_name);
+                let category = this.config.category_for(&name);
+                let save_dir = preset
+                    .save_dir
+                    .clone()
+                    .unwrap_or_else(|| this.config.save_dir(category.as_deref()));
+                let id = this.commands.add(NewDownload {
+                    url,
+                    file_name: preset.file_name.unwrap_or_default(),
+                    save_dir,
+                    category,
+                    description: String::new(),
+                    start,
+                    request: RequestOptions::default(),
+                });
+                if !start {
+                    this.commands.enqueue(QueueId::MAIN, vec![id]);
+                }
+            }),
+        );
+    }
+
     /// Adds the download the dialog describes and saves the choices worth remembering.
     fn add(&self, dialog: &DownloadInfoDialog, pending: &Pending, start: bool) {
         let (save_dir, file_name) = split_path(&dialog.get_save_path());
@@ -267,6 +318,24 @@ impl Adder {
     }
 }
 
+impl Pending {
+    /// The folder to save into for `category`.
+    fn dir(&self, config: &Config, category: Option<&str>) -> PathBuf {
+        self.preset
+            .save_dir
+            .clone()
+            .unwrap_or_else(|| config.save_dir(category))
+    }
+
+    /// The name to save as, before it is made unique.
+    fn name(&self) -> &str {
+        self.preset
+            .file_name
+            .as_deref()
+            .unwrap_or(&self.server_name)
+    }
+}
+
 /// Fills the dialog from the server's answer.
 fn probed(
     dialog: &DownloadInfoDialog,
@@ -278,7 +347,7 @@ fn probed(
     match result {
         Ok(probe) => {
             pending.server_name = probe.file_name.clone();
-            let category = config.category_for(&probe.file_name);
+            let category = config.category_for(pending.name());
             let index = category
                 .as_ref()
                 .and_then(|name| {
@@ -290,7 +359,7 @@ fn probed(
                 })
                 .map_or(0, |i| i as i32 + 1);
             dialog.set_category_index(index);
-            dialog.set_kind(file_kind(&probe.file_name));
+            dialog.set_kind(file_kind(pending.name()));
             dialog.set_size(
                 probe
                     .total_size
@@ -298,11 +367,8 @@ fn probed(
                     .into(),
             );
             if !pending.path_edited {
-                set_save_path(
-                    dialog,
-                    &config.save_dir(category.as_deref()),
-                    &probe.file_name,
-                );
+                let dir = pending.dir(config, category.as_deref());
+                set_save_path(dialog, &dir, pending.name());
             }
         }
         Err(message) => dialog.set_error(message.into()),
@@ -447,7 +513,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (adder, _, recorder) = adder(Err("server answered 404 Not Found".into()), dir.path());
         adder
-            .open_info("http://example.test/missing".into(), None)
+            .open_info(
+                "http://example.test/missing".into(),
+                None,
+                Preset::default(),
+            )
             .unwrap();
         let info = adder.infos.borrow().values().next().unwrap().clone_strong();
         assert_eq!(info.get_error(), "server answered 404 Not Found");
@@ -457,12 +527,69 @@ mod tests {
     }
 
     #[test]
+    fn a_preset_folder_and_name_fill_save_as() {
+        let dir = tempfile::tempdir().unwrap();
+        let (adder, _, _) = adder(probe("server.bin", Some(10)), Path::new("/downloads"));
+        let preset = Preset {
+            save_dir: Some(dir.path().into()),
+            file_name: Some("mine.mp3".into()),
+        };
+        adder
+            .open_info("http://example.test/x".into(), None, preset)
+            .unwrap();
+        let info = adder.infos.borrow().values().next().unwrap().clone_strong();
+        assert_eq!(
+            info.get_save_path(),
+            dir.path().join("mine.mp3").to_string_lossy().as_ref()
+        );
+        assert_eq!(info.get_kind(), crate::FileKind::Music);
+    }
+
+    #[test]
+    fn silent_adds_skip_the_dialogs_and_wait_in_the_main_queue_unless_started() {
+        let (adder, _, recorder) = adder(probe("movie.mkv", None), Path::new("/downloads"));
+        adder.add_silently(
+            "http://example.test/movie.mkv".into(),
+            Preset::default(),
+            false,
+        );
+        adder.add_silently(
+            "http://example.test/b".into(),
+            Preset {
+                save_dir: Some("/elsewhere".into()),
+                file_name: Some("b.zip".into()),
+            },
+            true,
+        );
+        assert!(adder.add_url.borrow().is_none() && adder.infos.borrow().is_empty());
+        let commands = recorder.0.borrow();
+        assert_eq!(commands.len(), 3, "{commands:?}");
+        assert!(
+            commands[0].starts_with("add http://example.test/movie.mkv")
+                && commands[0].contains("Video")
+                && commands[0].contains("start=false"),
+            "{}",
+            commands[0]
+        );
+        assert!(commands[1].starts_with("enqueue"), "{}", commands[1]);
+        assert!(
+            commands[2].contains("/elsewhere") && commands[2].contains("b.zip"),
+            "{}",
+            commands[2]
+        );
+    }
+
+    #[test]
     fn changing_the_category_moves_the_file_unless_the_path_was_edited() {
         let dir = tempfile::tempdir().unwrap();
         let (adder, config, _) = adder(probe("song.mp3", None), dir.path());
         config.remember_dir("Documents", Path::new("/docs"));
         adder
-            .open_info("http://example.test/song.mp3".into(), None)
+            .open_info(
+                "http://example.test/song.mp3".into(),
+                None,
+                Preset::default(),
+            )
             .unwrap();
         let info = adder.infos.borrow().values().next().unwrap().clone_strong();
         assert_eq!(info.get_size(), "Unknown");

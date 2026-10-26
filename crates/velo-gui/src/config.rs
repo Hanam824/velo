@@ -44,12 +44,9 @@ impl Config {
     /// The folder files in `category` are saved to: the category's own folder, else the
     /// downloads folder from the settings, else the system's.
     pub fn save_dir(&self, category: Option<&str>) -> PathBuf {
-        let settings = self.settings.borrow();
-        category
-            .and_then(|name| settings.categories.iter().find(|c| c.name == name))
-            .and_then(|c| c.save_dir.clone())
-            .or_else(|| settings.download_dir.clone())
-            .unwrap_or_else(|| self.default_downloads.clone())
+        self.settings
+            .borrow()
+            .save_dir_for(category, &self.default_downloads)
     }
 
     /// The downloads folder used when the settings don't name one.
