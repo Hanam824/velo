@@ -63,6 +63,7 @@ pub async fn fetch_range(
         let response =
             cancellable(cancel, async { Ok(client.get(url.clone()).send().await?) }).await?;
         if !response.status().is_success() {
+            tracing::warn!(url = velo_log::redact::url(url.as_str()), status = %response.status(), "request refused");
             return Err(Error::Status(response.status()));
         }
         response
@@ -145,8 +146,27 @@ pub(crate) async fn send_range(
         Some(end) => format!("bytes={position}-{}", end - 1),
         None => format!("bytes={position}-"),
     };
-    let response = client.get(url.clone()).header(RANGE, range).send().await?;
+    let response = client
+        .get(url.clone())
+        .header(RANGE, range.clone())
+        .send()
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(url = velo_log::redact::url(url.as_str()), range, %error, "range request failed");
+        })?;
     let status = response.status();
+    if status.is_success() {
+        tracing::debug!(url = velo_log::redact::url(url.as_str()), range, %status, "range answered");
+    } else {
+        tracing::warn!(
+            url = velo_log::redact::url(url.as_str()),
+            range,
+            %status,
+            content_type = ?response.headers().get(reqwest::header::CONTENT_TYPE),
+            server = ?response.headers().get(reqwest::header::SERVER),
+            "range refused"
+        );
+    }
     let range_start = response
         .headers()
         .get(CONTENT_RANGE)

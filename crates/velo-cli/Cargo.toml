@@ -21,6 +21,7 @@ velo-ipc.workspace = true
 velo-platform.workspace = true
 velo-store.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync"] }
+velo-log.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

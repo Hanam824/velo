@@ -215,7 +215,7 @@ impl App {
             let target = app.target_queue();
             let running = app.running_queues.borrow().clone();
             if let Err(error) = app.scheduler.open(target, &running, &app.table.borrow()) {
-                eprintln!("velo: couldn't open the Scheduler: {error}");
+                tracing::warn!(%error, "couldn't open the Scheduler");
             }
         }));
         ui.on_start_queue(with0(self, |app| {
@@ -281,7 +281,7 @@ impl App {
             if let Some(download) = download
                 && let Err(error) = app.properties.open(&download)
             {
-                eprintln!("velo: couldn't open Properties: {error}");
+                tracing::warn!(%error, "couldn't open Properties");
             }
         }));
         ui.on_delete_confirmed(move |raw, delete_file| confirmed((raw, delete_file)));
@@ -303,7 +303,7 @@ impl App {
     /// Opens download `id`'s progress dialog.
     pub fn show_progress(&self, id: DownloadId) {
         if let Err(error) = self.progress.open(id, &self.table.borrow()) {
-            eprintln!("velo: couldn't open the progress dialog: {error}");
+            tracing::warn!(%error, "couldn't open the progress dialog");
         }
     }
 
@@ -353,7 +353,7 @@ impl App {
             .category_dialog
             .open(name, Rc::new(move || downloads.clone()))
         {
-            eprintln!("velo: couldn't open the category dialog: {error}");
+            tracing::warn!(%error, "couldn't open the category dialog");
         }
     }
 

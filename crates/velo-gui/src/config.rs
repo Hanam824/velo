@@ -37,7 +37,7 @@ impl Config {
         if let Some(path) = &self.path
             && let Err(error) = velo_store::save_settings(path, &self.settings.borrow())
         {
-            eprintln!("velo: couldn't save the settings: {error}");
+            tracing::warn!(%error, "couldn't save the settings");
         }
     }
 

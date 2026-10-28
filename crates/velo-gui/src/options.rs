@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
-use velo_core::{ConnectionLimit, ProxyMode, ProxySettings, Settings};
+use velo_core::{ConnectionLimit, LogLevel, ProxyMode, ProxySettings, Settings};
 
 use crate::app::Commands;
 use crate::config::Config;
@@ -68,6 +68,14 @@ impl OptionsDialog {
         );
 
         let weak = window.as_weak();
+        window.on_open_log_folder(|| match velo_platform::AppDirs::new() {
+            Ok(dirs) => {
+                if let Err(error) = velo_platform::open(dirs.data()) {
+                    tracing::warn!(%error, "couldn't open the log folder");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "couldn't find the log folder"),
+        });
         window.on_browse_download_dir(move || {
             if let Some(window) = weak.upgrade()
                 && let Some(dir) = pick(
@@ -242,6 +250,11 @@ fn fill(window: &OptionsWindow, settings: &Settings, downloads: &Path, temp: &Pa
         velo_core::Appearance::Light => 1,
         velo_core::Appearance::Dark => 2,
     });
+    window.set_log_level(match settings.log_level {
+        LogLevel::Errors => 0,
+        LogLevel::Normal => 1,
+        LogLevel::Detailed => 2,
+    });
     window.set_error(SharedString::new());
 }
 
@@ -291,6 +304,11 @@ fn collect(window: &OptionsWindow, mut settings: Settings) -> Settings {
         1 => velo_core::Appearance::Light,
         2 => velo_core::Appearance::Dark,
         _ => velo_core::Appearance::System,
+    };
+    settings.log_level = match window.get_log_level() {
+        0 => LogLevel::Errors,
+        2 => LogLevel::Detailed,
+        _ => LogLevel::Normal,
     };
     settings
 }
@@ -386,6 +404,8 @@ mod tests {
         window.set_proxy_mode(2);
         window.set_proxy_url("socks5://127.0.0.1:1080".into());
         window.set_appearance(2);
+        assert_eq!(window.get_log_level(), 1, "normal by default");
+        window.set_log_level(2);
         window.set_monitor_clipboard(false);
         window.set_capture_extensions(".ZIP, iso\nzip".into());
         window.set_user_agent("Mozilla/5.0".into());
@@ -403,6 +423,7 @@ mod tests {
             settings.categories[4].save_dir.as_deref(),
             Some(Path::new("/data/video"))
         );
+        assert_eq!(settings.log_level, LogLevel::Detailed);
         assert_eq!(settings.max_connections, 16);
         assert_eq!(settings.speed_limit, Some(512 * 1024));
         assert_eq!(

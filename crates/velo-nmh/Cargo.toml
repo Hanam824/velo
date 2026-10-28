@@ -20,8 +20,10 @@ velo-core.workspace = true
 velo-engine.workspace = true
 velo-extract.workspace = true
 velo-ipc.workspace = true
+velo-log.workspace = true
 velo-platform.workspace = true
 velo-store.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

@@ -455,7 +455,7 @@ impl Actor {
                         Ok(client) => {
                             self.requests.insert(id, (request, client));
                         }
-                        Err(error) => eprintln!("velo: couldn't set up the request: {error}"),
+                        Err(error) => tracing::warn!(%error, "couldn't set up the request"),
                     }
                 }
                 self.emit(EngineEvent::Added(download.clone()));
@@ -595,6 +595,13 @@ impl Actor {
                 .as_ref()
                 .and_then(Source::max_request_size),
         };
+        tracing::info!(
+            id = download.id.0,
+            url = velo_log::redact::url(&download.url),
+            segments = download.segments.len(),
+            max_connections = options.max_connections,
+            "starting download"
+        );
         let resolver = self.config.resolver.clone();
         let progress = running.progress.clone();
         let (cancel, tx) = (running.cancel.clone(), self.task_tx.clone());
@@ -619,6 +626,11 @@ impl Actor {
                 }
                 Err(error) => Err(error),
             };
+            match &result {
+                Ok(_) => tracing::info!(id = download.id.0, "download finished"),
+                Err(Error::Cancelled) => tracing::info!(id = download.id.0, "download paused"),
+                Err(error) => tracing::warn!(id = download.id.0, %error, "download failed"),
+            }
             let _ = tx.send(TaskMessage::Done(download, result));
         });
     }
@@ -871,7 +883,7 @@ impl Actor {
         match client_with(&settings, &RequestOptions::default()) {
             Ok(client) => self.client = client,
             Err(error) => {
-                eprintln!("velo: keeping the old connection settings: {error}");
+                tracing::warn!(%error, "keeping the old connection settings");
                 return;
             }
         }

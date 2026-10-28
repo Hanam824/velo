@@ -19,7 +19,7 @@ pub use download::{Download, DownloadId, DownloadState};
 pub use event::{EngineEvent, ProgressUpdate};
 pub use queue::{Queue, QueueId, Schedule, TimeOfDay};
 pub use segment::{Segment, SegmentId, SegmentState};
-pub use settings::{Appearance, ConnectionLimit, ProxyMode, ProxySettings, Settings};
+pub use settings::{Appearance, ConnectionLimit, LogLevel, ProxyMode, ProxySettings, Settings};
 pub use source::{Resolver, Resolving, Source};
 
 /// Errors from Velo's domain layer.
