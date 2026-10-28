@@ -345,6 +345,7 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - Signing "Velo Safari Extension.app" with a Developer ID (and notarizing it), so Safari runs it without Allow Unsigned Extensions; then it can also move inside the dmg next to Velo.
 - Signing and publishing the extensions: the Chrome Web Store, Microsoft Edge Add-ons and Mozilla's add-on site (AMO), so they install without developer mode or a temporary add-on.
 - Solving YouTube's current player script. Since 2025, `base.js` keeps its strings in a table (`aa="…".split(";")`) and flattens its functions into numeric dispatch, so `velo-extract`'s searches can't cut out the signature and n functions; the TV and WEB clients then fail with "player changed" and Velo relies on the clients with direct addresses (Android VR, iOS). The fix is an AST-based solver that runs the whole player in boa, like yt-dlp's EJS solver (Unlicense), with a parser such as meriyah.
+- YouTube's proof-of-origin (PO) tokens. Android VR and iOS stream addresses work from home connections, but YouTube's video servers answer 403 to datacenter addresses such as GitHub's runners, so the nightly live check only warns on that. If home connections start getting 403 too, streams need a PO token, which comes from running YouTube's BotGuard challenge.
 - Saved logins (Options → Site Logins, and Add URL credentials that survive a restart): needs the OS keychain so passwords are never stored in plain text. Until then credentials live in memory only.
 
 ---
