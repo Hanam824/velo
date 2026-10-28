@@ -60,6 +60,24 @@ impl Client {
         needs_player: false,
     };
 
+    /// The Apple Vision Pro app: direct stream addresses that YouTube serves in full, also for
+    /// long videos where `IOS` and `ANDROID_VR` addresses stop after a few megabytes. It
+    /// refuses videos made for kids.
+    pub const VISIONOS: Self = Self {
+        name: "visionos",
+        client_name: "VISIONOS",
+        client_version: "1.02",
+        client_id: 101,
+        user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+        device: &[
+            ("deviceMake", "Apple"),
+            ("deviceModel", "RealityDevice17,1"),
+            ("osName", "visionOS"),
+            ("osVersion", "26.5.23O471"),
+        ],
+        needs_player: false,
+    };
+
     /// The TV app: needs the player's JavaScript, but plays many age-restricted videos.
     pub const TV: Self = Self {
         name: "tv",
@@ -84,7 +102,17 @@ impl Client {
 
     /// The clients tried by default, in order: the ones with direct addresses first, since
     /// they need no player script.
-    pub const DEFAULT_ORDER: [Self; 4] = [Self::ANDROID_VR, Self::IOS, Self::TV, Self::WEB];
+    ///
+    /// `VISIONOS` leads because its addresses download in full for every video that allows it;
+    /// `IOS` addresses stop after a few megabytes for some long videos, and `ANDROID_VR` lists
+    /// formats too but YouTube answers 403 when most of them are requested.
+    pub const DEFAULT_ORDER: [Self; 5] = [
+        Self::VISIONOS,
+        Self::IOS,
+        Self::ANDROID_VR,
+        Self::TV,
+        Self::WEB,
+    ];
 
     /// The body of a `/youtubei/v1/player` request for `video_id`, with `signature_timestamp`
     /// from the player's JavaScript for clients that need it.
