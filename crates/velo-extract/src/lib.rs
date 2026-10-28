@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use reqwest::Url;
-use reqwest::header::{CONTENT_TYPE, ORIGIN, USER_AGENT};
+use reqwest::header::{CONTENT_TYPE, ORIGIN, RANGE, USER_AGENT};
 use serde::Deserialize;
 
 pub use client::Client;
@@ -45,6 +45,13 @@ pub enum Error {
     /// No client got streams; says what each one was told.
     #[error("YouTube didn't offer the video's streams: {0}")]
     AllClientsFailed(String),
+    /// Clients got streams, but YouTube refuses to send them beyond their first bytes, which
+    /// it does when it wants proof that the viewer is a real player (a PO token).
+    #[error(
+        "YouTube refuses to send this video's streams to the apps Velo can imitate; it wants \
+         a proof of origin token that Velo can't give yet ({0})"
+    )]
+    StreamsRefused(String),
     /// The request couldn't be made.
     #[error(transparent)]
     Http(#[from] reqwest::Error),
@@ -267,6 +274,19 @@ pub struct Extractor {
     player: Arc<Mutex<Option<Arc<Player>>>>,
     /// The visitor ID YouTube gave, shared by clones.
     visitor_data: Arc<Mutex<Option<String>>>,
+    /// Whether to ask for a few bytes from the middle of the best streams before trusting a
+    /// client; see [`Extractor::with_stream_check`].
+    stream_check: bool,
+}
+
+/// How long a stream check waits for YouTube.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Where to ask for a few bytes of a stream of `length` bytes: its middle, or the start when
+/// the length isn't known. Addresses that stop working after the first few megabytes are
+/// caught by anything past them.
+fn probe_offset(length: Option<u64>) -> u64 {
+    length.map_or(0, |len| (len / 2).min(len.saturating_sub(1024)))
 }
 
 impl Extractor {
@@ -283,6 +303,7 @@ impl Extractor {
             cache_dir: None,
             player: Arc::default(),
             visitor_data: Arc::default(),
+            stream_check: true,
         }
     }
 
@@ -305,6 +326,15 @@ impl Extractor {
         self
     }
 
+    /// Whether to check, before trusting a client, that YouTube serves the middle of its best
+    /// streams (on by default). Some clients get addresses that work for the first few
+    /// megabytes and then answer 403; with the check such a client is skipped for the next
+    /// one. It costs a few small requests per video.
+    pub fn with_stream_check(mut self, on: bool) -> Self {
+        self.stream_check = on;
+        self
+    }
+
     /// The video at YouTube address `url`.
     pub async fn video_at(&self, url: &str) -> Result<Video> {
         let id = video_id(url).ok_or_else(|| Error::NotYouTube(url.to_string()))?;
@@ -320,6 +350,7 @@ impl Extractor {
         let mut refusals = Vec::new();
         let mut age_restricted = false;
         let mut login_required = None;
+        let mut streams_refused = false;
         for client in &self.clients {
             let player = if client.needs_player {
                 match self.load_player().await {
@@ -336,6 +367,7 @@ impl Extractor {
             let response = match self.ask(client, id, timestamp, &visitor_data).await {
                 Ok(response) => response,
                 Err(error) => {
+                    tracing::warn!(video = id, client = client.name, %error, "player request failed");
                     refusals.push(format!("{}: {error}", client.name));
                     continue;
                 }
@@ -396,22 +428,99 @@ impl Extractor {
                 continue;
             }
             let details = response.video_details.unwrap_or_default();
-            return Ok(Video {
+            let video = Video {
                 id: id.to_string(),
                 title: details.title,
                 author: details.author,
                 duration: details.length_seconds.and_then(|s| s.parse().ok()),
                 formats,
                 client: client.name,
-            });
+            };
+            if self.stream_check && self.refuses_streams(client, &video).await {
+                tracing::warn!(
+                    video = id,
+                    client = client.name,
+                    "streams are served at the start but refused further in; trying the next client"
+                );
+                refusals.push(format!(
+                    "{}: its streams are refused beyond the first bytes (403)",
+                    client.name
+                ));
+                streams_refused = true;
+                continue;
+            }
+            tracing::info!(
+                video = id,
+                client = client.name,
+                formats = ?video.formats.iter().map(|f| f.itag).collect::<Vec<_>>(),
+                "client accepted"
+            );
+            return Ok(video);
         }
         Err(if age_restricted {
             Error::AgeRestricted
         } else if let Some(reason) = login_required {
             Error::LoginRequired(reason)
+        } else if streams_refused {
+            Error::StreamsRefused(refusals.join("; "))
         } else {
             Error::AllClientsFailed(refusals.join("; "))
         })
+    }
+
+    /// Whether YouTube refuses to send the middle of the streams that `video` offers first (the
+    /// best video with its sound, and the best sound), as `client`.
+    ///
+    /// A network error or an odd answer isn't a refusal: a client is only rejected when
+    /// YouTube says 401 or 403.
+    async fn refuses_streams(&self, client: &Client, video: &Video) -> bool {
+        let choices = video.choices();
+        let mut probes: Vec<&Format> = Vec::new();
+        for choice in choices
+            .first()
+            .into_iter()
+            .chain(choices.iter().find(|c| c.is_audio_only()))
+        {
+            for format in choice.formats() {
+                if !probes.iter().any(|f| f.itag == format.itag) {
+                    probes.push(format);
+                }
+            }
+        }
+        for format in probes {
+            let Some(url) = format.url.as_deref() else {
+                continue;
+            };
+            let at = probe_offset(format.content_length);
+            let answer = self
+                .http
+                .get(url)
+                .header(USER_AGENT, client.user_agent)
+                .header(RANGE, format!("bytes={at}-{}", at + 1023))
+                .timeout(PROBE_TIMEOUT)
+                .send()
+                .await;
+            match answer {
+                Ok(response) => {
+                    let status = response.status();
+                    tracing::debug!(
+                        client = client.name,
+                        itag = format.itag,
+                        at,
+                        %status,
+                        url = velo_log::redact::url(url),
+                        "stream check"
+                    );
+                    if matches!(status.as_u16(), 401 | 403) {
+                        return true;
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(client = client.name, itag = format.itag, %error, "stream check failed");
+                }
+            }
+        }
+        false
     }
 
     /// Asks `/youtubei/v1/player` about video `id` as `client` and visitor `visitor_data`,
@@ -625,7 +734,23 @@ impl velo_core::Resolver for Extractor {
     fn resolve<'a>(&'a self, source: &'a velo_core::Source) -> velo_core::Resolving<'a> {
         Box::pin(async move {
             let velo_core::Source::YouTube { video_id, itags } = source;
-            let video = self.video(video_id).await.map_err(|e| e.to_string())?;
+            let video = self.video(video_id).await.map_err(|error| {
+                tracing::warn!(video = video_id.as_str(), %error, "couldn't resolve the video");
+                error.to_string()
+            })?;
+            for itag in itags {
+                tracing::info!(
+                    video = video_id.as_str(),
+                    client = video.client,
+                    itag,
+                    url = video
+                        .format(*itag)
+                        .and_then(|f| f.url.as_deref())
+                        .map(velo_log::redact::url)
+                        .unwrap_or_default(),
+                    "resolved stream"
+                );
+            }
             itags
                 .iter()
                 .map(|itag| {
@@ -675,4 +800,19 @@ struct StreamingData {
     formats: Vec<RawFormat>,
     #[serde(default)]
     adaptive_formats: Vec<RawFormat>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::probe_offset;
+
+    #[test]
+    fn the_stream_check_asks_for_the_middle() {
+        assert_eq!(probe_offset(None), 0);
+        assert_eq!(probe_offset(Some(1_000_000_000)), 500_000_000);
+        // A tiny stream: a whole KiB still fits after the offset.
+        assert_eq!(probe_offset(Some(1500)), 476);
+        assert_eq!(probe_offset(Some(100)), 0);
+        assert_eq!(probe_offset(Some(0)), 0);
+    }
 }

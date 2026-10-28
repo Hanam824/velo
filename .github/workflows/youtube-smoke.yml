@@ -4,6 +4,10 @@ name: YouTube smoke test
 # changes without notice. It is separate from CI and never blocks a pull request: when it fails,
 # it opens (or adds to) an issue labelled `youtube-broken`, and closes that issue once it passes
 # again.
+#
+# GitHub's runners are datacenter addresses, which YouTube refuses to send any stream to, so here
+# the test only checks extraction and prints "SKIPPED" for the download part. Run
+# `scripts/youtube-check.sh` from a home connection for that.
 on:
   schedule:
     - cron: "30 17 * * *" # 17:30 UTC, after the nightly build
@@ -55,7 +59,7 @@ jobs:
             echo "The nightly YouTube check failed: $RUN"
             echo
             echo '```'
-            grep -E "android_vr|ios|tv|web|panicked|Error|formats|kbps|joined" live.log | tail -n 30
+            grep -E "visionos|android_vr|ios|tv|web|SKIPPED|refused|deeper|panicked|Error|formats|kbps|joined" live.log | tail -n 30
             echo '```'
           } > report.md
           issue="$(gh issue list --label youtube-broken --state open --json number --jq '.[0].number // empty')"

@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use serde_json::Value;
 use velo_extract::{Client, Error, Extractor, StreamKind};
@@ -16,17 +17,79 @@ type Requests = Arc<Mutex<Vec<(String, Value)>>>;
 /// The fixture that answers `client_name` asking about `video_id`, or an HTTP error.
 fn answer(video_id: &str, client_name: &str) -> Result<&'static str, StatusCode> {
     Ok(match (video_id, client_name) {
-        ("okokokokok1", "ANDROID_VR") => include_str!("fixtures/unplayable.json"),
+        ("okokokokok1", "VISIONOS" | "IOS") => include_str!("fixtures/unplayable.json"),
         ("okokokokok1", _) => include_str!("fixtures/ok.json"),
         ("agegateage1", _) => include_str!("fixtures/age.json"),
         ("botcheckbot", _) => include_str!("fixtures/bot.json"),
         ("privatevid1", _) => include_str!("fixtures/private.json"),
         ("removedvid1", _) => include_str!("fixtures/removed.json"),
-        ("brokenvid11", "ANDROID_VR") => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        ("brokenvid11", "VISIONOS" | "IOS") => return Err(StatusCode::INTERNAL_SERVER_ERROR),
         ("webwebweb01", "WEB") => include_str!("fixtures/web.json"),
         ("webwebweb01", _) => include_str!("fixtures/unplayable.json"),
         _ => "not json",
     })
+}
+
+/// How far into a stream the stand-in serves while it "cuts off": a megabyte or so, then 403.
+const CUTOFF: u64 = 3_000_000;
+
+/// An answer for the videos that test the stream check, with streams served by the stand-in at
+/// `host`; `None` for every other video.
+///
+/// `cutoffvid01` is served in full to `ANDROID_VR` only; to the other clients its streams stop
+/// after [`CUTOFF`] bytes, like a video that wants a PO token. `refusedvid1` is refused
+/// to everyone, and `unreachabl01` has addresses nobody answers on.
+fn stream_answer(host: &str, video_id: &str, client_name: &str) -> Option<String> {
+    let mode = match (video_id, client_name) {
+        ("cutoffvid01", "ANDROID_VR") => "ok",
+        ("cutoffvid01", _) => "cutoff",
+        ("refusedvid1", _) => "never",
+        ("unreachabl01", _) => return Some(stream_json("127.0.0.1:1", video_id, "ok")),
+        _ => return None,
+    };
+    Some(stream_json(host, video_id, mode))
+}
+
+/// A player answer whose best streams are at `host`'s `/stream/<mode>/<itag>`.
+fn stream_json(host: &str, video_id: &str, mode: &str) -> String {
+    serde_json::json!({
+        "playabilityStatus": { "status": "OK" },
+        "videoDetails": { "videoId": video_id, "title": "Stream check", "author": "Velo", "lengthSeconds": "60" },
+        "streamingData": { "formats": [], "adaptiveFormats": [
+            { "itag": 137, "url": format!("http://{host}/stream/{mode}/137"),
+              "mimeType": "video/mp4; codecs=\"avc1.640028\"", "bitrate": 4400000,
+              "width": 1920, "height": 1080, "fps": 30, "contentLength": "100000000" },
+            { "itag": 140, "url": format!("http://{host}/stream/{mode}/140"),
+              "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 130000,
+              "contentLength": "10000000", "audioSampleRate": "44100" }
+        ] }
+    })
+    .to_string()
+}
+
+/// The stand-in's streams: `ok` always serves, `cutoff` stops after [`CUTOFF`] bytes, `never`
+/// refuses everything.
+async fn stream(
+    Path((mode, _itag)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let start: u64 = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes="))
+        .and_then(|v| v.split('-').next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let served = match mode.as_str() {
+        "ok" => true,
+        "cutoff" => start < CUTOFF,
+        _ => false,
+    };
+    if served {
+        (StatusCode::PARTIAL_CONTENT, vec![0u8; 1024]).into_response()
+    } else {
+        StatusCode::FORBIDDEN.into_response()
+    }
 }
 
 /// How many times the stand-in sent the player script.
@@ -62,20 +125,30 @@ async fn start() -> (Extractor, Requests) {
                         .unwrap_or_default()
                         .to_string();
                     requests.lock().unwrap().push((client_name, body.clone()));
-                    answer(
-                        body["videoId"].as_str().unwrap_or_default(),
-                        body["context"]["client"]["clientName"]
-                            .as_str()
-                            .unwrap_or_default(),
-                    )
+                    let host = headers
+                        .get(header::HOST)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default();
+                    let video_id = body["videoId"].as_str().unwrap_or_default();
+                    let client = body["context"]["client"]["clientName"]
+                        .as_str()
+                        .unwrap_or_default();
+                    match stream_answer(host, video_id, client) {
+                        Some(json) => Ok(json),
+                        None => answer(video_id, client).map(String::from),
+                    }
                 },
             ),
         )
+        .route("/stream/{mode}/{itag}", get(stream))
         .with_state(requests.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let extractor = Extractor::new(velo_engine::client().unwrap()).with_base(base.parse().unwrap());
+    // The fixtures' streams are on made-up hosts, so only the tests of the check turn it on.
+    let extractor = Extractor::new(velo_engine::client().unwrap())
+        .with_base(base.parse().unwrap())
+        .with_stream_check(false);
     (extractor, requests)
 }
 
@@ -90,7 +163,7 @@ async fn the_next_client_is_tried_when_one_is_refused() {
     assert_eq!(video.title, "Velo test video");
     assert_eq!(video.author, "Velo");
     assert_eq!(video.duration, Some(212));
-    assert_eq!(video.client, "ios");
+    assert_eq!(video.client, "android_vr");
 
     // The scrambled Opus stream needs the player's JavaScript, so it is left out, and iOS's
     // progressive stream wouldn't be served.
@@ -117,8 +190,8 @@ async fn the_next_client_is_tried_when_one_is_refused() {
 
     let requests = requests.lock().unwrap();
     let names: Vec<&str> = requests.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["28", "5"], "ANDROID_VR, then IOS");
-    assert_eq!(requests[1].1["videoId"], "okokokokok1");
+    assert_eq!(names, ["101", "5", "28"], "VISIONOS, IOS, then ANDROID_VR");
+    assert_eq!(requests[2].1["videoId"], "okokokokok1");
     assert!(
         requests
             .iter()
@@ -173,8 +246,11 @@ async fn other_addresses_are_refused_without_asking() {
             .await,
         Err(Error::NotYouTube(_))
     ));
-    let only_ios = extractor.with_clients(vec![Client::IOS]);
-    assert_eq!(only_ios.video("okokokokok1").await.unwrap().client, "ios");
+    let only_vr = extractor.with_clients(vec![Client::ANDROID_VR]);
+    assert_eq!(
+        only_vr.video("okokokokok1").await.unwrap().client,
+        "android_vr"
+    );
     assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
@@ -256,4 +332,48 @@ async fn the_extractor_resolves_sources_to_current_addresses() {
     );
     let missing = extractor.resolve(&source(vec![22])).await.unwrap_err();
     assert!(missing.contains("22"), "{missing}");
+}
+
+#[tokio::test]
+async fn a_client_whose_streams_are_cut_off_is_skipped() {
+    let (extractor, requests) = start().await;
+    let extractor = extractor.with_stream_check(true);
+    let video = extractor.video("cutoffvid01").await.unwrap();
+    assert_eq!(video.client, "android_vr", "VISIONOS and IOS were skipped");
+    let names: Vec<String> = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(n, _)| n.clone())
+        .collect();
+    assert_eq!(names, ["101", "5", "28"]);
+
+    // Without the check the first client's cut-off streams are accepted.
+    let video = extractor
+        .with_stream_check(false)
+        .video("cutoffvid01")
+        .await
+        .unwrap();
+    assert_eq!(video.client, "visionos");
+}
+
+#[tokio::test]
+async fn streams_refused_to_every_client_say_so() {
+    let (extractor, _) = start().await;
+    let extractor = extractor.with_stream_check(true);
+    let Err(Error::StreamsRefused(details)) = extractor.video("refusedvid1").await else {
+        panic!("expected the streams to be refused");
+    };
+    assert!(
+        details.contains("visionos") && details.contains("android_vr"),
+        "{details}"
+    );
+}
+
+#[tokio::test]
+async fn a_check_that_cant_reach_the_streams_doesnt_reject_the_client() {
+    let (extractor, _) = start().await;
+    let extractor = extractor.with_stream_check(true);
+    let video = extractor.video("unreachabl01").await.unwrap();
+    assert_eq!(video.client, "visionos");
 }
