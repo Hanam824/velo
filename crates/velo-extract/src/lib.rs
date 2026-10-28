@@ -265,6 +265,8 @@ pub struct Extractor {
     cache_dir: Option<PathBuf>,
     /// The player last read, shared by clones.
     player: Arc<Mutex<Option<Arc<Player>>>>,
+    /// The visitor ID YouTube gave, shared by clones.
+    visitor_data: Arc<Mutex<Option<String>>>,
 }
 
 impl Extractor {
@@ -280,6 +282,7 @@ impl Extractor {
             clients: Client::DEFAULT_ORDER.to_vec(),
             cache_dir: None,
             player: Arc::default(),
+            visitor_data: Arc::default(),
         }
     }
 
@@ -313,6 +316,7 @@ impl Extractor {
     /// Stops at once if YouTube says the video doesn't exist or is private; otherwise tries
     /// every client and reports the most telling refusal.
     pub async fn video(&self, id: &str) -> Result<Video> {
+        let visitor_data = self.visitor_data().await?;
         let mut refusals = Vec::new();
         let mut age_restricted = false;
         let mut login_required = None;
@@ -329,7 +333,7 @@ impl Extractor {
                 None
             };
             let timestamp = player.as_ref().and_then(|p| p.signature_timestamp);
-            let response = match self.ask(client, id, timestamp).await {
+            let response = match self.ask(client, id, timestamp, &visitor_data).await {
                 Ok(response) => response,
                 Err(error) => {
                     refusals.push(format!("{}: {error}", client.name));
@@ -363,6 +367,9 @@ impl Extractor {
             let mut formats: Vec<Format> = streams
                 .formats
                 .into_iter()
+                // YouTube lists progressive streams to the clients with direct addresses but
+                // answers 403 when they are downloaded.
+                .filter(|_| client.needs_player)
                 .filter_map(|f| f.into_format(false))
                 .chain(
                     streams
@@ -407,13 +414,14 @@ impl Extractor {
         })
     }
 
-    /// Asks `/youtubei/v1/player` about video `id` as `client`, sending the player's
-    /// `timestamp` if it has one.
+    /// Asks `/youtubei/v1/player` about video `id` as `client` and visitor `visitor_data`,
+    /// sending the player's `timestamp` if it has one.
     async fn ask(
         &self,
         client: &Client,
         id: &str,
         timestamp: Option<u64>,
+        visitor_data: &str,
     ) -> Result<PlayerResponse> {
         let url = self
             .base
@@ -427,11 +435,47 @@ impl Extractor {
             .header(ORIGIN, "https://www.youtube.com")
             .header("X-YouTube-Client-Name", client.client_id.to_string())
             .header("X-YouTube-Client-Version", client.client_version)
-            .body(client.player_request(id, timestamp).to_string())
+            .body(
+                client
+                    .player_request(id, timestamp, visitor_data)
+                    .to_string(),
+            )
             .send()
             .await?
             .error_for_status()?;
         Ok(serde_json::from_slice(&response.bytes().await?)?)
+    }
+
+    /// The visitor ID sent with every player request, asked of `/youtubei/v1/visitor_id`
+    /// the first time.
+    // ponytail: kept for the extractor's lifetime; ask again on a bot check if YouTube starts
+    // expiring them.
+    async fn visitor_data(&self) -> Result<String> {
+        if let Some(visitor_data) = self.visitor_data.lock().unwrap().as_ref() {
+            return Ok(visitor_data.clone());
+        }
+        let url = self
+            .base
+            .join("youtubei/v1/visitor_id?prettyPrint=false")
+            .expect("a valid path");
+        let body = Client::WEB.player_request("", None, "");
+        let response = self
+            .http
+            .post(url)
+            .header(USER_AGENT, Client::WEB.user_agent)
+            .header(CONTENT_TYPE, "application/json")
+            .body(serde_json::json!({ "context": body["context"] }).to_string())
+            .send()
+            .await?
+            .error_for_status()?;
+        let answer: serde_json::Value = serde_json::from_slice(&response.bytes().await?)?;
+        let visitor_data = answer["responseContext"]["visitorData"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| Error::Unreadable(serde::de::Error::custom("no visitorData")))?
+            .to_string();
+        *self.visitor_data.lock().unwrap() = Some(visitor_data.clone());
+        Ok(visitor_data)
     }
 }
 

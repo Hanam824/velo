@@ -88,12 +88,21 @@ impl Client {
 
     /// The body of a `/youtubei/v1/player` request for `video_id`, with `signature_timestamp`
     /// from the player's JavaScript for clients that need it.
-    pub fn player_request(&self, video_id: &str, signature_timestamp: Option<u64>) -> Value {
+    ///
+    /// `visitor_data` identifies the viewer; YouTube refuses requests without it with a bot
+    /// check.
+    pub fn player_request(
+        &self,
+        video_id: &str,
+        signature_timestamp: Option<u64>,
+        visitor_data: &str,
+    ) -> Value {
         let mut client = json!({
             "clientName": self.client_name,
             "clientVersion": self.client_version,
             "hl": "en",
             "gl": "US",
+            "visitorData": visitor_data,
         });
         for (key, value) in self.device {
             // Numbers go as numbers, as the apps send them.
@@ -122,14 +131,15 @@ mod tests {
 
     #[test]
     fn requests_name_the_client_and_the_video() {
-        let body = Client::ANDROID_VR.player_request("dQw4w9WgXcQ", None);
+        let body = Client::ANDROID_VR.player_request("dQw4w9WgXcQ", None, "Cgt");
         assert_eq!(body["videoId"], "dQw4w9WgXcQ");
         assert_eq!(body["context"]["client"]["clientName"], "ANDROID_VR");
+        assert_eq!(body["context"]["client"]["visitorData"], "Cgt");
         assert_eq!(body["context"]["client"]["androidSdkVersion"], 32);
         assert_eq!(body["context"]["client"]["osVersion"], "12L");
         assert!(body.get("playbackContext").is_none());
 
-        let body = Client::IOS.player_request("dQw4w9WgXcQ", Some(20_160));
+        let body = Client::IOS.player_request("dQw4w9WgXcQ", Some(20_160), "Cgt");
         assert_eq!(
             body["playbackContext"]["contentPlaybackContext"]["signatureTimestamp"],
             20_160

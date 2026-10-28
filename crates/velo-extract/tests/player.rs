@@ -48,6 +48,10 @@ async fn start() -> (Extractor, Requests) {
             }),
         )
         .route(
+            "/youtubei/v1/visitor_id",
+            post(|| async { r#"{"responseContext":{"visitorData":"CgtWZWxvVGVzdA"}}"# }),
+        )
+        .route(
             "/youtubei/v1/player",
             post(
                 |State(requests): State<Requests>, headers: HeaderMap, body: String| async move {
@@ -88,22 +92,20 @@ async fn the_next_client_is_tried_when_one_is_refused() {
     assert_eq!(video.duration, Some(212));
     assert_eq!(video.client, "ios");
 
-    // The scrambled Opus stream needs the player's JavaScript, so it is left out.
+    // The scrambled Opus stream needs the player's JavaScript, so it is left out, and iOS's
+    // progressive stream wouldn't be served.
     let itags: Vec<u32> = video.formats.iter().map(|f| f.itag).collect();
-    assert_eq!(itags, [18, 137, 140]);
+    assert_eq!(itags, [137, 140]);
     let kinds: Vec<StreamKind> = video.formats.iter().map(|f| f.kind).collect();
-    assert_eq!(
-        kinds,
-        [StreamKind::Muxed, StreamKind::Video, StreamKind::Audio]
-    );
-    assert_eq!(video.formats[1].height, Some(1080));
-    assert_eq!(video.formats[2].content_length, Some(3_430_000));
+    assert_eq!(kinds, [StreamKind::Video, StreamKind::Audio]);
+    assert_eq!(video.formats[0].height, Some(1080));
+    assert_eq!(video.formats[1].content_length, Some(3_430_000));
 
     let choices: Vec<Vec<u32>> = video.choices().iter().map(|c| c.itags()).collect();
     assert_eq!(
         choices,
-        [vec![137, 140], vec![18], vec![140]],
-        "1080p joined, 360p with sound, then sound only"
+        [vec![137, 140], vec![140]],
+        "1080p joined, then sound only"
     );
     let joined = video.choice(&[137, 140]).unwrap();
     assert_eq!(joined.size(), Some(92_000_000 + 3_430_000));
@@ -117,6 +119,12 @@ async fn the_next_client_is_tried_when_one_is_refused() {
     let names: Vec<&str> = requests.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, ["28", "5"], "ANDROID_VR, then IOS");
     assert_eq!(requests[1].1["videoId"], "okokokokok1");
+    assert!(
+        requests
+            .iter()
+            .all(|(_, body)| body["context"]["client"]["visitorData"] == "CgtWZWxvVGVzdA"),
+        "every request names the visitor"
+    );
 }
 
 #[tokio::test]
