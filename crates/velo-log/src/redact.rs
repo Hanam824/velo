@@ -42,12 +42,19 @@ pub fn header(name: &str, value: &str) -> String {
     }
 }
 
-/// `path` with the user's home folder replaced by `~`.
+/// `path` with the user's home folder replaced by `~`, and `/` between what follows it.
 pub fn path(path: &Path) -> String {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     match home.as_deref().map(Path::new) {
         Some(home) if !home.as_os_str().is_empty() => match path.strip_prefix(home) {
-            Ok(rest) => format!("~/{}", rest.display()),
+            Ok(rest) => {
+                // The same separator on every system, so logs read alike.
+                let parts: Vec<_> = rest
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect();
+                format!("~/{}", parts.join("/"))
+            }
             Err(_) => path.display().to_string(),
         },
         _ => path.display().to_string(),
