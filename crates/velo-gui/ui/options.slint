@@ -59,6 +59,8 @@ export component OptionsWindow inherits Window {
     in-out property <string> proxy-url;
     // Appearance: 0 system, 1 light, 2 dark.
     in-out property <int> appearance;
+    // How much goes in the log files: 0 errors only, 1 normal, 2 detailed.
+    in-out property <int> log-level;
     // Why the settings can't be saved, if they can't.
     in property <string> error;
 
@@ -68,6 +70,7 @@ export component OptionsWindow inherits Window {
     callback browse-category-folder(index: int);
     callback add-server-limit();
     callback remove-server-limit(index: int);
+    callback open-log-folder();
     callback accepted();
     callback cancelled();
 
@@ -99,6 +102,17 @@ export component OptionsWindow inherits Window {
                         text <=> root.capture-extensions;
                         enabled: root.monitor-clipboard;
                         wrap: word-wrap;
+                    }
+                    Labelled {
+                        label: "Log detail (after a restart):";
+                        ComboBox {
+                            model: ["Errors only", "Normal", "Detailed"];
+                            current-index <=> root.log-level;
+                        }
+                        Button {
+                            text: "Open log folder";
+                            clicked => { root.open-log-folder(); }
+                        }
                     }
                 }
             }

@@ -75,8 +75,16 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let settings = velo_store::load_settings(&dirs.settings()).unwrap_or_else(|error| {
-        eprintln!("velo-nmh: using the default settings: {error}");
+    let settings = velo_store::load_settings(&dirs.settings());
+    let _log = velo_log::init(velo_log::Config {
+        app: "velo-nmh",
+        version: env!("CARGO_PKG_VERSION"),
+        dir: dirs.data().to_path_buf(),
+        level: settings.as_ref().ok().map(|s| s.log_level.filter().into()),
+        stderr: false,
+    });
+    let settings = settings.unwrap_or_else(|error| {
+        tracing::warn!(%error, "using the default settings");
         Settings::default()
     });
     let backend = Real {
@@ -91,7 +99,7 @@ fn main() -> ExitCode {
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("velo-nmh: {error}");
+            tracing::error!(%error, "the browser connection failed");
             ExitCode::FAILURE
         }
     }

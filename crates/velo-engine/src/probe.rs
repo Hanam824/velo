@@ -83,7 +83,10 @@ pub async fn probe(client: &Client, url: &str) -> Result<Probe> {
                 false,
             ))
         }
-        status => Err(Error::Status(status)),
+        status => {
+            tracing::warn!(url = velo_log::redact::url(url), %status, "probe refused");
+            Err(Error::Status(status))
+        }
     }
 }
 

@@ -38,19 +38,19 @@ pub struct SystemDesktop;
 impl Desktop for SystemDesktop {
     fn open(&self, path: &Path) {
         if let Err(error) = velo_platform::open(path) {
-            eprintln!("velo: {error}");
+            tracing::warn!(%error, "couldn't open the file");
         }
     }
 
     fn reveal(&self, path: &Path) {
         if let Err(error) = velo_platform::reveal(path) {
-            eprintln!("velo: {error}");
+            tracing::warn!(%error, "couldn't show the file in its folder");
         }
     }
 
     fn shutdown(&self) {
         if let Err(error) = velo_platform::shutdown() {
-            eprintln!("velo: {error}");
+            tracing::warn!(%error, "couldn't shut the computer down");
         }
     }
 
@@ -60,7 +60,7 @@ impl Desktop for SystemDesktop {
 
     fn notify(&self, title: &str, body: &str) {
         if let Err(error) = velo_platform::notify(title, body) {
-            eprintln!("velo: {error}");
+            tracing::warn!(%error, "couldn't show a notification");
         }
     }
 }
@@ -89,7 +89,7 @@ impl Completion {
     pub fn finished(self: &Rc<Self>, download: &Download, options: &DownloadOptions) {
         if options.show_complete && self.config.settings().show_complete_dialog {
             if let Err(error) = self.show(download) {
-                eprintln!("velo: couldn't open Download complete: {error}");
+                tracing::warn!(%error, "couldn't open Download complete");
             }
         } else {
             self.desktop
@@ -97,7 +97,7 @@ impl Completion {
         }
         if options.shutdown {
             if let Err(error) = self.start_countdown() {
-                eprintln!("velo: couldn't start the shutdown countdown: {error}");
+                tracing::warn!(%error, "couldn't start the shutdown countdown");
             }
         } else if options.exit {
             self.desktop.quit();
@@ -112,7 +112,7 @@ impl Completion {
         );
         if queue.schedule.shutdown_when_done {
             if let Err(error) = self.start_countdown() {
-                eprintln!("velo: couldn't start the shutdown countdown: {error}");
+                tracing::warn!(%error, "couldn't start the shutdown countdown");
             }
         } else if queue.schedule.exit_when_done {
             self.desktop.quit();

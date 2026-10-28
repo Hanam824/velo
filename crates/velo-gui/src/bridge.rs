@@ -237,7 +237,7 @@ async fn persist(
 /// Writes one event to the store; a failed write is reported and the next event tries again.
 fn save(store: &mut Store, event: &EngineEvent) {
     if let Err(error) = store.apply(event) {
-        eprintln!("velo: couldn't save the download list: {error}");
+        tracing::warn!(%error, "couldn't save the download list");
     }
 }
 

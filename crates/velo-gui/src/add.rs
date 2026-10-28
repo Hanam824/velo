@@ -159,7 +159,7 @@ impl Adder {
             });
             let _ = dialog.hide();
             if let Err(error) = this.open_info(url, credentials, Preset::default()) {
-                eprintln!("velo: couldn't open Download File Info: {error}");
+                tracing::warn!(%error, "couldn't open Download File Info");
             }
         });
         let this = Rc::downgrade(self);
@@ -357,7 +357,7 @@ impl Adder {
         let video = match result {
             Ok(video) => video,
             Err(error) => {
-                eprintln!("velo: couldn't add the video: {error}");
+                tracing::warn!(%error, "couldn't add the video");
                 return;
             }
         };
@@ -367,7 +367,10 @@ impl Adder {
             video.choice(itags)
         };
         let Some(choice) = choice else {
-            eprintln!("velo: YouTube doesn't offer that format of {}", video.id);
+            tracing::warn!(
+                video = video.id.as_str(),
+                "YouTube doesn't offer that format"
+            );
             return;
         };
         let name = preset

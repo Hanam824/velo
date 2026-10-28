@@ -48,6 +48,32 @@ pub struct Settings {
     /// File extensions, lowercase and without the dot, that Velo offers to download when such
     /// an address is copied.
     pub capture_extensions: Vec<String>,
+    /// How much Velo writes to its log files; takes effect at the next start.
+    pub log_level: LogLevel,
+}
+
+/// How much detail the log files get.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Only failures.
+    Errors,
+    /// What happened and what went wrong: starts, finishes, refusals.
+    #[default]
+    Normal,
+    /// Also every request.
+    Detailed,
+}
+
+impl LogLevel {
+    /// The level name `tracing` filters use for this setting.
+    pub fn filter(self) -> &'static str {
+        match self {
+            Self::Errors => "error",
+            Self::Normal => "info",
+            Self::Detailed => "debug",
+        }
+    }
 }
 
 /// The colour scheme of Velo's windows.
@@ -189,6 +215,7 @@ impl Default for Settings {
             close_to_tray: true,
             monitor_clipboard: true,
             capture_extensions: default_capture_extensions(),
+            log_level: LogLevel::Normal,
         }
     }
 }

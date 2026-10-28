@@ -70,6 +70,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let settings = velo_store::load_settings(&dirs.settings())?;
+    let _log = velo_log::init(velo_log::Config {
+        app: "velo",
+        version: env!("CARGO_PKG_VERSION"),
+        dir: dirs.data().to_path_buf(),
+        level: Some(settings.log_level.filter().into()),
+        stderr: false,
+    });
     let store = Store::open(&dirs.database())?;
     let downloads = store.load_downloads()?;
     let queues = store.load_queues()?;
@@ -118,14 +125,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     ui.on_options(move || {
         if let Err(error) = options.open() {
-            eprintln!("velo: couldn't open Options: {error}");
+            tracing::warn!(%error, "couldn't open Options");
         }
     });
     let open_add = {
         let adder = adder.clone();
         move || {
             if let Err(error) = adder.open() {
-                eprintln!("velo: couldn't open Add URL: {error}");
+                tracing::warn!(%error, "couldn't open Add URL");
             }
         }
     };
@@ -133,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch = BatchDialog::new(config.clone(), adder.clone());
     ui.on_add_batch(move || {
         if let Err(error) = batch.open() {
-            eprintln!("velo: couldn't open Add Batch Download: {error}");
+            tracing::warn!(%error, "couldn't open Add Batch Download");
         }
     });
     {
@@ -177,7 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(tray)
         }
         Err(error) => {
-            eprintln!("velo: no tray icon: {error}");
+            tracing::warn!(%error, "no tray icon");
             None
         }
     };
@@ -222,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|text| velo_core::links::capture(&text, &settings.capture_extensions))
                 && let Err(error) = adder.open_info(url, None, Preset::default())
             {
-                eprintln!("velo: couldn't open Download File Info: {error}");
+                tracing::warn!(%error, "couldn't open Download File Info");
             }
         });
     }
@@ -286,7 +293,7 @@ fn register_browser_host(data_dir: &std::path::Path) {
     if let Err(error) =
         velo_platform::register_native_host(&velo_platform::NativeHost::velo(&host), data_dir)
     {
-        eprintln!("velo: couldn't register the browser helper: {error}");
+        tracing::warn!(%error, "couldn't register the browser helper");
     }
 }
 
@@ -324,10 +331,10 @@ fn export_list(urls: &[String], config: &Config) {
     tell("Export List", &message);
 }
 
-/// Shows `message` as a notification titled `title`, or on stderr if notifications fail.
+/// Shows `message` as a notification titled `title`, or in the log if it can't be sent.
 fn tell(title: &str, message: &str) {
     if velo_platform::notify(title, message).is_err() {
-        eprintln!("velo: {message}");
+        tracing::warn!(title, message, "couldn't show a notification");
     }
 }
 
@@ -360,7 +367,7 @@ fn handle_request(
             if silent {
                 adder.add_silently(url, preset, start, itags);
             } else if let Err(error) = adder.open_info(url, None, preset) {
-                eprintln!("velo: couldn't open Download File Info: {error}");
+                tracing::warn!(%error, "couldn't open Download File Info");
             }
         }
         velo_ipc::Message::StartQueue { queue } => {
@@ -374,7 +381,7 @@ fn handle_request(
 /// Shows the main window, also if it was closed to the tray or minimized.
 fn show_main(ui: &AppWindow) {
     if let Err(error) = ui.show() {
-        eprintln!("velo: couldn't show the window: {error}");
+        tracing::warn!(%error, "couldn't show the window");
     }
     ui.window().set_minimized(false);
 }
