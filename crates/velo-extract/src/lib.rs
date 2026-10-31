@@ -589,6 +589,15 @@ impl Extractor {
 }
 
 impl Extractor {
+    /// YouTube's current web player, cut out of its script (read from the cache if this
+    /// version was seen before).
+    ///
+    /// Fails with [`Error::PlayerChanged`] when the script no longer has a shape the
+    /// extractor knows. Needs no client, so it works where YouTube shows a bot check.
+    pub async fn player(&self) -> Result<Arc<Player>> {
+        self.load_player().await
+    }
+
     /// The current player, read from the cache if this version was seen before.
     async fn load_player(&self) -> Result<Arc<Player>> {
         let api = self.text("iframe_api").await?;

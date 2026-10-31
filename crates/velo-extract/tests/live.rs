@@ -11,9 +11,15 @@
 //!
 //! YouTube refuses every stream to datacenter addresses such as GitHub's runners. When even the
 //! first bytes are refused to every client, the download part is skipped (and says so).
+//!
+//! It also shows those addresses a bot check ("Sign in to confirm you're not a bot") instead of
+//! the video. That says nothing about Velo, so when every client failed that way the result is
+//! `INCONCLUSIVE` (printed, not a failure). A client that failed for another reason, such as a
+//! player script of a shape Velo can't read, is a real failure. The player script itself has no
+//! bot check, so `current_player_can_be_solved` tests it from any address.
 
 use reqwest::header::{RANGE, USER_AGENT};
-use velo_extract::{Client, Extractor, StreamKind, Video};
+use velo_extract::{Client, Error, Extractor, StreamKind, Video};
 
 /// "Me at the zoo", the first video on YouTube, which is unlikely to go away.
 const SHORT: &str = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
@@ -47,9 +53,52 @@ struct Served {
     big: u16,
 }
 
+/// Why a client got no streams for a video.
+enum Failure {
+    /// YouTube showed a bot check; nothing is known about Velo.
+    Blocked,
+    /// Anything else: Velo or YouTube's format is at fault.
+    Broken,
+}
+
+impl Failure {
+    fn of(error: &Error) -> Self {
+        match error {
+            Error::LoginRequired(_) => Self::Blocked,
+            _ => Self::Broken,
+        }
+    }
+}
+
+/// What the clients' answers add up to.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    /// Some client got streams; go on to check them.
+    Streams,
+    /// No client got streams, and every one was shown a bot check.
+    Inconclusive,
+    /// No client got streams, and some failed for a reason that is Velo's to fix.
+    Broken,
+}
+
+fn verdict(served: &[Served], failures: &[Failure]) -> Verdict {
+    if !served.is_empty() {
+        Verdict::Streams
+    } else if failures.iter().all(|f| matches!(f, Failure::Blocked)) && !failures.is_empty() {
+        Verdict::Inconclusive
+    } else {
+        Verdict::Broken
+    }
+}
+
 /// Asks every client alone about `url` and prints what each one's best stream serves.
-async fn clients_report(http: &reqwest::Client, label: &str, url: &str) -> Vec<Served> {
+async fn clients_report(
+    http: &reqwest::Client,
+    label: &str,
+    url: &str,
+) -> (Vec<Served>, Vec<Failure>) {
     let mut report = Vec::new();
+    let mut failures = Vec::new();
     for client in Client::DEFAULT_ORDER {
         let alone = Extractor::new(http.clone())
             .with_clients(vec![client])
@@ -58,12 +107,14 @@ async fn clients_report(http: &reqwest::Client, label: &str, url: &str) -> Vec<S
             Ok(video) => video,
             Err(error) => {
                 eprintln!("{label} {}: {error}", client.name);
+                failures.push(Failure::of(&error));
                 continue;
             }
         };
         let choices = video.choices();
         let Some(best) = choices.first() else {
             eprintln!("{label} {}: no format to download", client.name);
+            failures.push(Failure::Broken);
             continue;
         };
         let format = best.formats()[0];
@@ -83,14 +134,14 @@ async fn clients_report(http: &reqwest::Client, label: &str, url: &str) -> Vec<S
         );
         report.push(served);
     }
-    report
+    (report, failures)
 }
 
 /// Checks the video at `url`, which must exist when `required`; returns it as the extractor
 /// gives it.
 async fn check(label: &str, url: &str, required: bool) -> Option<Video> {
     let http = velo_engine::client().unwrap();
-    let report = clients_report(&http, label, url).await;
+    let (report, failures) = clients_report(&http, label, url).await;
 
     let refused_at_start = !report.is_empty() && report.iter().all(|s| s.first == 403);
     if refused_at_start {
@@ -106,6 +157,12 @@ async fn check(label: &str, url: &str, required: bool) -> Option<Video> {
         return Some(video);
     }
     if report.is_empty() {
+        if verdict(&report, &failures) == Verdict::Inconclusive {
+            eprintln!(
+                "INCONCLUSIVE {label}: YouTube shows this address a bot check, so extraction                  can't be verified from here"
+            );
+            return None;
+        }
         assert!(!required, "{label}: no client got the video's streams");
         eprintln!("SKIPPED {label}: no client got the video's streams");
         return None;
@@ -149,7 +206,9 @@ async fn real_videos_have_streams_that_download() {
         return;
     }
 
-    let video = check("short", SHORT, true).await.unwrap();
+    let Some(video) = check("short", SHORT, true).await else {
+        return;
+    };
     eprintln!(
         "{} by {} via {}: {} formats",
         video.title,
@@ -176,4 +235,46 @@ async fn real_videos_have_streams_that_download() {
             video.choices()[0].size()
         );
     }
+}
+
+/// The player script is a static file without a bot check, so this tells a changed player from
+/// a blocked address.
+#[tokio::test]
+#[ignore = "talks to YouTube; set VELO_LIVE_YOUTUBE=1 and run with --ignored"]
+async fn current_player_can_be_solved() {
+    if std::env::var_os("VELO_LIVE_YOUTUBE").is_none() {
+        eprintln!("skipped: VELO_LIVE_YOUTUBE isn't set");
+        return;
+    }
+    let player = Extractor::new(velo_engine::client().unwrap())
+        .player()
+        .await
+        .unwrap_or_else(|e| panic!("player: {e}"));
+    let signature = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let n = "abcdefghij12";
+    let (signatures, ns) = player
+        .solve(&[signature.into()], &[n.into()])
+        .unwrap_or_else(|e| panic!("player {} solve: {e}", player.id));
+    eprintln!("player {}: solved", player.id);
+    assert!(!signatures[0].is_empty() && signatures[0] != signature);
+    assert!(!ns[0].is_empty() && ns[0] != n);
+}
+
+#[test]
+fn only_bot_checks_make_a_check_inconclusive() {
+    let served = Served {
+        first: 206,
+        deep: 206,
+        big: 206,
+    };
+    assert_eq!(verdict(&[served], &[Failure::Broken]), Verdict::Streams);
+    assert_eq!(
+        verdict(&[], &[Failure::Blocked, Failure::Blocked]),
+        Verdict::Inconclusive
+    );
+    assert_eq!(
+        verdict(&[], &[Failure::Blocked, Failure::Broken]),
+        Verdict::Broken
+    );
+    assert_eq!(verdict(&[], &[]), Verdict::Broken);
 }
