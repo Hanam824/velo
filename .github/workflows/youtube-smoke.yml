@@ -5,9 +5,11 @@ name: YouTube smoke test
 # it opens (or adds to) an issue labelled `youtube-broken`, and closes that issue once it passes
 # again.
 #
-# GitHub's runners are datacenter addresses, which YouTube refuses to send any stream to, so here
-# the test only checks extraction and prints "SKIPPED" for the download part. Run
-# `scripts/youtube-check.sh` from a home connection for that.
+# GitHub's runners are datacenter addresses, which YouTube refuses to send any stream to and
+# shows a bot check instead of videos. So there are three outcomes: pass; INCONCLUSIVE (every
+# client got the bot check; a warning, and an open issue stays open); broken (some client failed
+# for another reason, or the player script can't be solved; an issue). The download part prints
+# "SKIPPED" here; run `scripts/youtube-check.sh` from a home connection for that.
 on:
   schedule:
     - cron: "30 17 * * *" # 17:30 UTC, after the nightly build
@@ -47,6 +49,11 @@ jobs:
           set -o pipefail
           cargo test -p velo-extract --test live --locked -- --ignored --nocapture 2>&1 | tee live.log
 
+      - name: Warn about an inconclusive check
+        if: steps.live.outcome == 'success'
+        run: |
+          grep INCONCLUSIVE live.log | while read -r line; do echo "::warning::$line"; done || true
+
       - name: Report a failure in an issue
         if: steps.live.outcome == 'failure'
         env:
@@ -59,7 +66,7 @@ jobs:
             echo "The nightly YouTube check failed: $RUN"
             echo
             echo '```'
-            grep -E "visionos|android_vr|ios|tv|web|SKIPPED|refused|deeper|panicked|Error|formats|kbps|joined" live.log | tail -n 30
+            grep -E "visionos|android_vr|ios|tv|web|player|SKIPPED|INCONCLUSIVE|refused|deeper|panicked|Error|formats|kbps|joined" live.log | tail -n 30
             echo '```'
           } > report.md
           issue="$(gh issue list --label youtube-broken --state open --json number --jq '.[0].number // empty')"
@@ -76,6 +83,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # An inconclusive check proves nothing, so it doesn't close an issue.
+          if grep -q INCONCLUSIVE live.log; then exit 0; fi
           for issue in $(gh issue list --label youtube-broken --state open --json number --jq '.[].number'); do
             gh issue close "$issue" --comment "The nightly YouTube check passes again: $RUN"
           done
