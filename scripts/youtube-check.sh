@@ -6,9 +6,9 @@
 #   ./scripts/youtube-check.sh                      # the default long video
 #   VELO_LIVE_LONG_VIDEO=<id or address> ./scripts/youtube-check.sh
 #
-# Run it from a home connection (by hand, or from cron or launchd): YouTube refuses every
-# stream to datacenter addresses such as GitHub's runners, so the nightly workflow can't do
-# this part and says "SKIPPED" instead.
+# Run it from a home connection, by hand before a release or when a video stops downloading:
+# YouTube refuses every stream to datacenter addresses such as GitHub's runners, so CI can't do
+# this.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

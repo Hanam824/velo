@@ -248,7 +248,7 @@ Rename neki → velo everywhere in these files.
    - **Then:** add a pure-Rust MP4/WebM remux module (fMP4 box rewriting via the `mp4` crate / `matroska` writer).
    - **Fallback:** if pure-Rust remux slips, an optional `ffmpeg` found on PATH.
 6. Downloads go through the normal segmented engine. YouTube throttles ranges, so we use about 10 MB chunks per request.
-7. A **fixture-based test suite** (saved player responses and `base.js` files) plus a nightly live smoke test in CI that is allowed to fail and opens an issue. YouTube changes will break the extractor, so maintenance is expected.
+7. A **fixture-based test suite** (saved player responses and `base.js` files) plus a live check run by hand from a home connection (`scripts/youtube-check.sh`; CI can't, because YouTube refuses its runners). YouTube changes will break the extractor, so maintenance is expected.
 
 **Risks:**
 - PO-token and bot checks can block clients.
@@ -331,7 +331,7 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - D33–34: Chromium MV3 extension: download capture, context menu, YouTube overlay button + format menu.
 - D35: Firefox build (manifest differences, `browser_specific_settings`, NMH manifest).
 - D36–37: Safari Web Extension wrapper app + handler → IPC; included in the macOS dmg.
-- D38: Release v0.2.0; nightly live-YouTube smoke workflow.
+- D38: Release v0.2.0; live-YouTube check (first a nightly workflow, later replaced by `scripts/youtube-check.sh` run by hand).
 
 **Later (backlog):**
 - Site Grabber wizard, download limits per hour, antivirus hook and synchronization queues.
@@ -344,7 +344,7 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - Joining unfragmented MP4 files (rebuilding `stco`/`co64`): YouTube's streams are fragmented, so it isn't needed yet.
 - Signing "Velo Safari Extension.app" with a Developer ID (and notarizing it), so Safari runs it without Allow Unsigned Extensions; then it can also move inside the dmg next to Velo.
 - Signing and publishing the extensions: the Chrome Web Store, Microsoft Edge Add-ons and Mozilla's add-on site (AMO), so they install without developer mode or a temporary add-on.
-- Solving YouTube's current player script. Since 2025, `base.js` keeps its strings in a table (`aa="…".split(";")`) and flattens its functions into numeric dispatch, so `velo-extract`'s searches can't cut out the signature and n functions; the TV and WEB clients then fail with "player changed" and Velo relies on the clients with direct addresses (Android VR, iOS). The fix is an AST-based solver that runs the whole player in boa, like yt-dlp's EJS solver (Unlicense), with a parser such as meriyah.
+- YouTube's TV and WEB clients. The current web player hides its signature function behind a string table and numeric dispatch, but that no longer matters: WEB answers with SABR streaming addresses only (`serverAbrStreamingUrl`, no `url` or `signatureCipher`) and TVHTML5 answers "The page needs to be reloaded" (checked 2026-11-01). Supporting them means SABR streaming or finding what TV needs now; until then Velo uses `VISIONOS`, `IOS` and `ANDROID_VR`.
 - Log diagnostics: a "Copy diagnostics" button that puts the version, the OS and the tail of `velo.log` on the clipboard for bug reports; changing the log level without a restart.
 - YouTube's proof-of-origin (PO) tokens. `velo-extract` now checks a client's streams (a few bytes from the middle) before using them and falls back to the next client, and the `visionos` client works without a token today. If every client is refused (`Error::StreamsRefused`), streams need a PO token, which comes from running YouTube's BotGuard challenge.
 - Saved logins (Options → Site Logins, and Add URL credentials that survive a restart): needs the OS keychain so passwords are never stored in plain text. Until then credentials live in memory only.
@@ -363,5 +363,5 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - **Release:** a nightly workflow produces installers; install each on a VM/runner and launch it (smoke step in CI that runs `velo-cli --version`).
 - **Phase 2:**
   - Fixture tests for the extractor.
-  - A nightly live test on a known public video (allowed to fail, but it alerts us).
+  - A live test on a known public video, run by hand from a home connection (`scripts/youtube-check.sh`); CI can't, because YouTube refuses its runners.
   - Manual: load the unpacked extension in Chrome and Firefox and click the overlay on YouTube → the file downloads and plays.
