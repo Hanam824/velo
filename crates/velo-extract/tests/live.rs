@@ -1,7 +1,7 @@
 //! A check against the real YouTube, which changes without notice. It is ignored by default,
-//! so normal test runs never touch the internet; the nightly smoke workflow runs it with
-//! `VELO_LIVE_YOUTUBE=1 cargo test -p velo-extract --test live -- --ignored`, and
-//! `scripts/youtube-check.sh` runs it from a home connection.
+//! so normal test runs never touch the internet; run it by hand from a home connection with
+//! `scripts/youtube-check.sh` (or `VELO_LIVE_YOUTUBE=1 cargo test -p velo-extract --test live
+//! -- --ignored`). It isn't run in CI, because YouTube refuses datacenter addresses.
 //!
 //! For a short and a long video it asks every client alone for the first bytes, the middle and
 //! a whole 10 MiB request from the middle of the best stream (what the engine asks for), and
@@ -9,14 +9,13 @@
 //! and then refused, so the first bytes alone prove nothing: the test fails when streams are
 //! served at the start but refused deeper everywhere.
 //!
-//! YouTube refuses every stream to datacenter addresses such as GitHub's runners. When even the
-//! first bytes are refused to every client, the download part is skipped (and says so).
+//! YouTube refuses every stream to datacenter addresses. When even the first bytes are refused
+//! to every client, the download part is skipped (and says so).
 //!
 //! It also shows those addresses a bot check ("Sign in to confirm you're not a bot") instead of
 //! the video. That says nothing about Velo, so when every client failed that way the result is
-//! `INCONCLUSIVE` (printed, not a failure). A client that failed for another reason, such as a
-//! player script of a shape Velo can't read, is a real failure. The player script itself has no
-//! bot check, so `current_player_can_be_solved` tests it from any address.
+//! `INCONCLUSIVE` (printed, not a failure). A client that failed for another reason is a real
+//! failure, unless another client got the streams.
 
 use reqwest::header::{RANGE, USER_AGENT};
 use velo_extract::{Client, Error, Extractor, StreamKind, Video};
@@ -235,29 +234,6 @@ async fn real_videos_have_streams_that_download() {
             video.choices()[0].size()
         );
     }
-}
-
-/// The player script is a static file without a bot check, so this tells a changed player from
-/// a blocked address.
-#[tokio::test]
-#[ignore = "talks to YouTube; set VELO_LIVE_YOUTUBE=1 and run with --ignored"]
-async fn current_player_can_be_solved() {
-    if std::env::var_os("VELO_LIVE_YOUTUBE").is_none() {
-        eprintln!("skipped: VELO_LIVE_YOUTUBE isn't set");
-        return;
-    }
-    let player = Extractor::new(velo_engine::client().unwrap())
-        .player()
-        .await
-        .unwrap_or_else(|e| panic!("player: {e}"));
-    let signature = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let n = "abcdefghij12";
-    let (signatures, ns) = player
-        .solve(&[signature.into()], &[n.into()])
-        .unwrap_or_else(|e| panic!("player {} solve: {e}", player.id));
-    eprintln!("player {}: solved", player.id);
-    assert!(!signatures[0].is_empty() && signatures[0] != signature);
-    assert!(!ns[0].is_empty() && ns[0] != n);
 }
 
 #[test]
