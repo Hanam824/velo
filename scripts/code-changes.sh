@@ -5,10 +5,12 @@
 #   ./scripts/code-changes.sh origin/main...HEAD   # what a pull request changes (used by CI)
 #
 # Arguments go straight to `git diff --name-only`. Docs are any Markdown file (in any folder,
-# including CLAUDE.md and .claude/skills), docs/ and LICENSE files. This is the one place that list lives.
+# including CLAUDE.md), docs/, LICENSE files and the Claude Code setup (.claude/, .mcp.json), which
+# no build reads. This is the one place that list lives.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 git diff --name-only "$@" -- . \
-    ':(exclude)*.md' ':(exclude)docs/**' ':(exclude)LICENSE*'
+    ':(exclude)*.md' ':(exclude)docs/**' ':(exclude)LICENSE*' \
+    ':(exclude).claude/**' ':(exclude).mcp.json'
