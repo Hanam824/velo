@@ -97,7 +97,7 @@ pub struct Places {
     pub database: PathBuf,
     /// The settings file.
     pub settings: PathBuf,
-    /// Part files when the settings don't name a folder.
+    /// A video's streams while they download, when the settings don't name a folder.
     pub parts: PathBuf,
     /// Finished files when the settings don't name a folder.
     pub downloads: PathBuf,

@@ -1,4 +1,4 @@
-//! Multi-connection downloads, retries and merging against the local test server.
+//! Multi-connection downloads, retries and resuming against the local test server.
 
 mod support;
 
@@ -9,7 +9,7 @@ use std::time::Duration;
 use reqwest::{StatusCode, Url};
 use velo_core::{DownloadId, Segment, SegmentId, SegmentState};
 use velo_engine::{
-    CancellationToken, Error, Options, Progress, client, download_file, download_segments, merge,
+    CancellationToken, Error, Options, Progress, client, download_file, download_segments, finish,
 };
 
 use support::{SIZE, body};
@@ -54,13 +54,13 @@ async fn download(
 }
 
 #[tokio::test]
-async fn a_file_downloads_over_several_connections_and_merges() {
+async fn a_file_downloads_over_several_connections_into_one_file() {
     let (root, progress, result) = download("/slow/data.bin", &options()).await;
     let path = result.unwrap();
     assert_eq!(path, root.path().join("save").join("data.bin"));
     assert!(fs::read(&path).unwrap() == body());
 
-    // Idle workers split the file; every part was merged and the temp folder removed.
+    // Idle workers split the file; it was moved into place and nothing is left behind.
     let segments = progress.snapshot();
     assert!(segments.len() >= 4, "{segments:?}");
     assert!(segments.iter().all(|s| s.state == SegmentState::Done));
@@ -87,14 +87,14 @@ async fn cut_off_connections_are_retried() {
 }
 
 #[tokio::test]
-async fn a_server_that_keeps_failing_gives_up_and_keeps_the_parts() {
+async fn a_server_that_keeps_failing_gives_up_and_keeps_the_file() {
     let (root, progress, result) = download("/fail/data.bin", &options()).await;
     assert!(
         matches!(result, Err(Error::Status(StatusCode::SERVICE_UNAVAILABLE))),
         "{result:?}"
     );
     assert!(!root.path().join("save").join("data.bin").exists());
-    assert!(root.path().join("temp").join("1").is_dir());
+    assert!(root.path().join("save").join("data.bin.velo-tmp").is_file());
     assert!(
         progress
             .snapshot()
@@ -114,52 +114,114 @@ async fn servers_without_ranges_and_empty_files_use_one_connection() {
 }
 
 #[tokio::test]
-async fn a_download_resumes_from_its_part_files() {
+async fn a_download_resumes_from_its_saved_progress() {
     let base = support::start().await;
     let root = tempfile::tempdir().unwrap();
-    let dir = root.path().join("parts");
-    fs::create_dir_all(&dir).unwrap();
+    let data = root.path().join("data.bin.velo-tmp");
     let half = SIZE as u64 / 2;
     let expected = body();
 
-    // Part 0 has 1000 bytes; part 1 is complete and one byte too long.
-    fs::write(dir.join("0.part"), &expected[..1000]).unwrap();
-    let mut long = expected[half as usize..].to_vec();
-    long.push(0);
-    fs::write(dir.join("1.part"), &long).unwrap();
-    let progress = Progress::new(vec![
-        Segment::new(SegmentId(0), 0, half),
-        Segment::new(SegmentId(1), half, SIZE as u64),
-    ]);
+    // Segment 0 has its first 1000 bytes; segment 1 is done. The rest of the file is garbage
+    // that a resume must overwrite, so only the saved counts can be trusted.
+    let mut file = vec![0xAA; SIZE];
+    file[..1000].copy_from_slice(&expected[..1000]);
+    file[half as usize..].copy_from_slice(&expected[half as usize..]);
+    fs::write(&data, &file).unwrap();
+    let mut first = Segment::new(SegmentId(0), 0, half);
+    first.downloaded = 1000;
+    let mut second = Segment::new(SegmentId(1), half, SIZE as u64);
+    second.downloaded = second.len();
+    second.state = SegmentState::Done;
+    let progress = Progress::new(vec![first, second]);
 
     let url = Url::parse(&format!("{base}/files/data.bin")).unwrap();
     download_segments(
         &client().unwrap(),
         &url,
-        &dir,
+        &data,
+        SIZE as u64,
         &progress,
         &options(),
         &CancellationToken::new(),
     )
     .await
     .unwrap();
+    assert_eq!(progress.durable_snapshot(), progress.snapshot());
     let save_path = root.path().join("data.bin");
-    merge(&dir, &progress.snapshot(), Some(SIZE as u64), &save_path)
+    finish(&data, &progress.snapshot(), Some(SIZE as u64), &save_path)
         .await
         .unwrap();
     assert!(fs::read(&save_path).unwrap() == expected);
+    assert!(!data.exists());
 }
 
 #[tokio::test]
-async fn merge_refuses_unfinished_downloads_and_existing_files() {
+async fn a_stopped_download_resumes_from_its_durable_progress() {
+    let base = support::start().await;
     let root = tempfile::tempdir().unwrap();
-    let dir = root.path().join("parts");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("0.part"), b"abc").unwrap();
+    let data = root.path().join("data.bin.velo-tmp");
+    let url = Url::parse(&format!("{base}/slow/data.bin")).unwrap();
+    let progress = Progress::new(vec![Segment::new(SegmentId(0), 0, SIZE as u64)]);
+
+    // Stop part way, then resume from what would be saved, as after a restart.
+    let cancel = CancellationToken::new();
+    let stop = {
+        let (cancel, progress) = (cancel.clone(), progress.clone());
+        async move {
+            while progress.downloaded() < SIZE as u64 / 3 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            cancel.cancel();
+        }
+    };
+    let (client, options) = (client().unwrap(), options());
+    let (stopped, ()) = tokio::join!(
+        download_segments(
+            &client,
+            &url,
+            &data,
+            SIZE as u64,
+            &progress,
+            &options,
+            &cancel
+        ),
+        stop
+    );
+    assert!(matches!(stopped, Err(Error::Cancelled)), "{stopped:?}");
+    let saved = progress.durable_snapshot();
+    assert!(saved.iter().any(|s| s.downloaded > 0), "{saved:?}");
+    assert!(saved.iter().any(|s| s.remaining() > 0), "{saved:?}");
+    // Every byte counted as durable really is in the file, at its segment's offset.
+    let (on_disk, expected) = (fs::read(&data).unwrap(), body());
+    for s in &saved {
+        let range = s.start as usize..(s.start + s.downloaded) as usize;
+        assert!(on_disk[range.clone()] == expected[range], "{s:?}");
+    }
+
+    let resumed = Progress::new(saved);
+    download_segments(
+        &client,
+        &url,
+        &data,
+        SIZE as u64,
+        &resumed,
+        &options,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(fs::read(&data).unwrap() == body());
+}
+
+#[tokio::test]
+async fn finish_refuses_unfinished_downloads_and_existing_files() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("out.txt.velo-tmp");
+    fs::write(&data, b"abc").unwrap();
     let save_path = root.path().join("out.txt");
     let mut segment = Segment::new(SegmentId(0), 0, 3);
 
-    let unfinished = merge(&dir, std::slice::from_ref(&segment), Some(3), &save_path).await;
+    let unfinished = finish(&data, std::slice::from_ref(&segment), Some(3), &save_path).await;
     assert!(
         matches!(unfinished, Err(Error::NotFinished)),
         "{unfinished:?}"
@@ -167,22 +229,32 @@ async fn merge_refuses_unfinished_downloads_and_existing_files() {
 
     segment.downloaded = 3;
     segment.state = SegmentState::Done;
-    let wrong_size = merge(&dir, std::slice::from_ref(&segment), Some(4), &save_path).await;
+    let wrong_size = finish(&data, std::slice::from_ref(&segment), Some(4), &save_path).await;
     assert!(
         matches!(wrong_size, Err(Error::NotFinished)),
         "{wrong_size:?}"
     );
 
     fs::write(&save_path, b"old").unwrap();
-    let exists = merge(&dir, std::slice::from_ref(&segment), Some(3), &save_path).await;
+    let exists = finish(&data, std::slice::from_ref(&segment), Some(3), &save_path).await;
     assert!(matches!(exists, Err(Error::Exists(_))), "{exists:?}");
     assert_eq!(fs::read(&save_path).unwrap(), b"old");
-    assert!(Path::new(&dir.join("0.part")).exists());
+    assert!(Path::new(&data).exists());
 
     fs::remove_file(&save_path).unwrap();
-    merge(&dir, &[segment], Some(3), &save_path).await.unwrap();
+    fs::write(&data, b"abcd").unwrap();
+    let short = finish(&data, std::slice::from_ref(&segment), Some(3), &save_path).await;
+    assert!(
+        matches!(short, Err(Error::SizeMismatch { .. })),
+        "{short:?}"
+    );
+
+    fs::write(&data, b"abc").unwrap();
+    finish(&data, &[segment], Some(3), &save_path)
+        .await
+        .unwrap();
     assert_eq!(fs::read(&save_path).unwrap(), b"abc");
-    assert!(!dir.exists());
+    assert!(!data.exists());
 }
 
 #[tokio::test]

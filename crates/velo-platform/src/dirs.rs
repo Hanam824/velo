@@ -57,7 +57,7 @@ impl AppDirs {
         self.config.join("settings.toml")
     }
 
-    /// The default folder for part files while downloading.
+    /// The default folder for a video's streams while they download.
     pub fn parts(&self) -> &Path {
         &self.parts
     }

@@ -22,7 +22,7 @@ use crate::add::{ProbeDone, Prober, VideoDone};
 
 /// What the bridge needs to start the engine.
 pub struct BridgeConfig {
-    /// Folder for part files.
+    /// Folder for a video's streams while they download.
     pub temp_dir: PathBuf,
     /// Connections, speed limit, user agent and proxy.
     pub settings: Settings,

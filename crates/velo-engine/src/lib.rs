@@ -1,16 +1,16 @@
-//! The segmented download engine: probes a URL, splits it into ranges, downloads each range into a part file and merges the parts.
+//! The segmented download engine: probes a URL, splits it into ranges, downloads each range into its place in one data file and renames it into place when done.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Once;
 
-use velo_core::{DownloadId, ProxyMode, Segment, Settings};
+use velo_core::{ProxyMode, Settings};
 
 mod download;
 mod engine;
 mod fetch;
 mod filename;
+mod finish;
 mod limiter;
-mod merge;
 pub mod planner;
 mod probe;
 pub mod scheduler;
@@ -20,8 +20,8 @@ pub use download::download_file;
 pub use engine::{DownloadEdit, Engine, EngineConfig, NewDownload, RetryPolicy};
 pub use fetch::fetch_range;
 pub use filename::{file_name, sanitize_file_name, unique_file_name};
+pub use finish::{finish, temp_path};
 pub use limiter::Limiter;
-pub use merge::merge;
 pub use probe::{Probe, probe};
 pub use reqwest::Url;
 pub use segmented::{Options, Progress, download_segments};
@@ -33,7 +33,7 @@ pub enum Error {
     /// The HTTP request failed: bad URL, connection, TLS or protocol error.
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
-    /// Reading or writing a part file failed.
+    /// Reading or writing a file failed.
     #[error("file error: {0}")]
     Io(#[from] std::io::Error),
     /// The server answered with an error status.
@@ -50,26 +50,16 @@ pub enum Error {
         /// Bytes that were expected.
         expected: u64,
     },
-    /// A merge was asked for before every segment was done, or the segments don't cover the
+    /// Finishing was asked for before every segment was done, or the segments don't cover the
     /// whole file.
     #[error("the download isn't finished")]
     NotFinished,
-    /// A part file's size doesn't match its segment.
-    #[error("part file {path} holds {actual} bytes, expected {expected}")]
-    PartSize {
-        /// The part file.
-        path: PathBuf,
-        /// The segment's length.
-        expected: u64,
-        /// The part file's size.
-        actual: u64,
-    },
-    /// The merged file's size doesn't match the server's.
-    #[error("merged file holds {actual} bytes, expected {expected}")]
+    /// The finished file's size doesn't match the server's.
+    #[error("the file holds {actual} bytes, expected {expected}")]
     SizeMismatch {
         /// Size from the server.
         expected: u64,
-        /// Size of the merged file.
+        /// Size of the file.
         actual: u64,
     },
     /// The download was stopped by its caller.
@@ -195,13 +185,6 @@ impl std::fmt::Debug for Credentials {
             .field("password", &"…")
             .finish()
     }
-}
-
-/// Path of a segment's part file: `<temp_dir>/<download id>/<segment id>.part`.
-pub fn part_path(temp_dir: &Path, download: DownloadId, segment: &Segment) -> PathBuf {
-    temp_dir
-        .join(download.0.to_string())
-        .join(segment.part_file_name())
 }
 
 #[cfg(test)]

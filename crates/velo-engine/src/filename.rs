@@ -79,9 +79,16 @@ pub fn sanitize_file_name(name: &str) -> Option<String> {
 }
 
 /// Returns `name`, or `name (1)`, `name (2)`… with the number before the extension, whichever
-/// is the first that nothing in `dir` is called yet.
+/// is the first that nothing in `dir` is called yet. A name is also taken while another
+/// download is writing to `<name>.velo-tmp`.
 pub fn unique_file_name(dir: &Path, name: &str) -> String {
-    if !dir.join(name).exists() {
+    let taken = |name: &str| {
+        // Anything there counts, even a broken link, which `exists` would call free.
+        let there = |path: &Path| path.symlink_metadata().is_ok();
+        let path = dir.join(name);
+        there(&path) || there(&crate::temp_path(&path))
+    };
+    if !taken(name) {
         return name.to_string();
     }
     let (stem, ext) = match name.rsplit_once('.') {
@@ -90,7 +97,7 @@ pub fn unique_file_name(dir: &Path, name: &str) -> String {
     };
     (1..)
         .map(|n| format!("{stem} ({n}){ext}"))
-        .find(|candidate| !dir.join(candidate).exists())
+        .find(|candidate| !taken(candidate))
         .expect("some number is free")
 }
 

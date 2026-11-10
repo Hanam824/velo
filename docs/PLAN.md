@@ -2,7 +2,7 @@
 
 ## Context
 The goal is a cross-platform rewrite of Internet Download Manager (IDM) in Rust with a Slint UI. The windows and workflow follow IDM's layout. The name, logo and icons are our own: we must not ship IDM's trademark or artwork.
-- **Phase 1:** segmented download acceleration. Each file is split into many ranges, each range is downloaded into its own part file, and the parts are merged when everything finishes.
+- **Phase 1:** segmented download acceleration. Each file is split into many ranges, and each range is downloaded into its place in one preallocated file, which is renamed into place when everything finishes.
 - **Phase 2:** YouTube link extraction, plus a "Download this video" overlay on YouTube pages, delivered through browser extensions.
 - **Starting point:** `/Users/tranthehuy/Documents/Github/IDM` is empty and not yet a git repo.
 - **Borrowed setup:** CI/CD and `.claude` come from `Hanam824/neki`, which is already a Rust 2024 + Slint workspace.
@@ -150,7 +150,7 @@ scripts/, .github/workflows/, .claude/, CLAUDE.md
 - If the server doesn't support ranges, use a single connection and mark the download as not resumable.
 
 **Segment model**
-- Each segment is `Segment { id, start, end, downloaded, part_path, state }`.
+- Each segment is `Segment { id, start, end, downloaded, state }`.
 - The segment list is kept sorted by `start`.
 
 **Planner**
@@ -159,18 +159,19 @@ scripts/, .github/workflows/, .claude/, CLAUDE.md
 
 **Workers**
 - There are N tokio tasks, where N is the max connections setting (default 8, max 32, with per-host overrides).
-- Each worker streams `Range: start+downloaded … end-1` into its own part file.
+- Each worker streams `Range: start+downloaded … end-1` into the shared data file at that offset (its own file handle, seeked).
 - If a segment's `end` shrinks while the worker is running, the worker stops at the new boundary. The shared end is an `AtomicU64`.
 - On error, the worker retries with backoff. It reuses one `reqwest::Client` per host for keep-alive.
 
-**Part files**
-- Files are written as `<temp_dir>/<download_id>/<seg_id>.part`.
-- When all segments are done, stream-concatenate the parts in `start` order into `<save_path>.velo-tmp`, then fsync, then rename atomically, then delete the parts. This gives the "split then merge" behavior that was asked for.
-- Before renaming, check the final size against the total size.
+**Data file**
+- Every segment writes into `<save_path>.velo-tmp`, created at the full size (sparse; on Windows `FSCTL_SET_SPARSE`, so NTFS doesn't zero-fill the gap before a far write). The save path is claimed right after the probe.
+- When all segments are done, fsync, check the size against the total and rename atomically. No merge: no second copy of the data and no 2x disk space.
+- A video's two streams are each downloaded into one file in `<temp_dir>/<download_id>/` and then joined with `velo-mux`.
 
 **Persistence**
 - Snapshot the segment state to SQLite every 2 seconds, and on pause or exit.
-- On resume, each segment's offset is the size of its part file on disk, which is the source of truth.
+- The file is synced once a second (one sync for all workers) and only bytes written before a sync count as durable; only durable progress is saved, and on resume it is the source of truth. A crash loses at most the unsynced bytes, which are fetched again.
+- Downloads left with part files by older versions restart from zero.
 - If the `ETag` or `Last-Modified` changed, restart the download (an option can override this).
 
 **Other engine pieces**
@@ -341,6 +342,10 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - Options tabs not built yet: File types (Phase 2 capture), Sounds (per-event sounds need an audio library), and a proxy login (with the OS keychain). General has clipboard monitoring; its browser-integration settings come with Phase 2.
 - "Open with…" in Download complete and the context menu: each OS has its own app chooser and no common way to call it.
 - Joining WebM video and Opus sound (VP9/AV1 in WebM): `velo-mux` joins fragmented MP4 only, so the format picker offers MP4 video with M4A sound; an `ffmpeg` on `PATH` is used if the MP4 joiner can't handle a pair.
+- Reserving disk space for a download up front (`fallocate`, `F_PREALLOCATE`, `SetFileValidData`): the data file is sparse, so a full disk shows up as a failed write part way. It would also stop NTFS from fragmenting a file that many connections write at once, which slows reading it back from a hard drive.
+- FAT32 and exFAT have no sparse files, so setting the data file's length may write zeros for all of it before the first byte arrives; grow the file as it fills there instead.
+- Record in the stored download that it claimed its name (a schema migration), so a resume never continues into a `.velo-tmp` it didn't create (downloads saved before the single-file engine never claimed one, or a `.velo-tmp` the user deleted by hand and another download then claimed).
+- Moving a finished file into place without replacing anything (`renameat2(RENAME_NOREPLACE)`, `renamex_np(RENAME_EXCL)`, `MoveFileExW` without `REPLACE_EXISTING`): today the save path is checked and then renamed over, so a file created at that name in between is replaced.
 - Joining unfragmented MP4 files (rebuilding `stco`/`co64`): YouTube's streams are fragmented, so it isn't needed yet.
 - Signing "Velo Safari Extension.app" with a Developer ID (and notarizing it), so Safari runs it without Allow Unsigned Extensions; then it can also move inside the dmg next to Velo.
 - Signing and publishing the extensions: the Chrome Web Store, Microsoft Edge Add-ons and Mozilla's add-on site (AMO), so they install without developer mode or a temporary add-on.

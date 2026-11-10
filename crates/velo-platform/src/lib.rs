@@ -15,7 +15,7 @@ mod power;
 pub use clipboard::ClipboardWatcher;
 pub use dialogs::{pick_file, pick_folder, pick_save_path};
 pub use dirs::AppDirs;
-pub use files::{open, reveal};
+pub use files::{open, preallocate, reveal};
 pub use launch::launch_detached;
 pub use native_host::{
     CHROMIUM_EXTENSION_ID, FIREFOX_EXTENSION_ID, NATIVE_HOST_NAME, NativeHost, register_native_host,
