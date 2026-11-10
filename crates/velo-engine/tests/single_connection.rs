@@ -5,9 +5,8 @@ mod support;
 use std::fs;
 
 use reqwest::{StatusCode, Url};
-use velo_core::DownloadId;
 use velo_engine::planner::initial_segments;
-use velo_engine::{CancellationToken, Error, client, fetch_range, part_path, probe};
+use velo_engine::{CancellationToken, Error, client, fetch_range, probe};
 
 use support::{ETAG_VALUE, LAST_MODIFIED_VALUE, SIZE, body};
 
@@ -75,7 +74,7 @@ async fn probe_handles_empty_files_and_reports_error_statuses() {
 }
 
 #[tokio::test]
-async fn a_probed_file_downloads_into_its_part_file() {
+async fn a_probed_file_downloads_into_its_file() {
     let base = support::start().await;
     let temp = tempfile::tempdir().unwrap();
     let client = client().unwrap();
@@ -84,8 +83,7 @@ async fn a_probed_file_downloads_into_its_part_file() {
         .unwrap();
     let total = probe.total_size.unwrap();
     let segment = &initial_segments(total)[0];
-    let part = part_path(temp.path(), DownloadId(7), segment);
-    assert!(part.ends_with(std::path::Path::new("7").join("0.part")));
+    let part = temp.path().join("7").join("data.bin.velo-tmp");
 
     let mut progress = 0;
     let len = fetch_range(

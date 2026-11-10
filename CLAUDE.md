@@ -44,12 +44,12 @@ Dependency direction (lower layers never depend on higher ones):
 ```
 velo-core → velo-store, velo-engine, velo-ipc
 velo-platform, velo-extract, velo-mux, velo-log (standalone; velo-engine and velo-extract use velo-log only for `redact`)
-velo-mux → velo-engine
+velo-mux, velo-platform → velo-engine (velo-engine uses velo-platform only for `preallocate`)
 all of the above → velo-gui, velo-cli, velo-nmh
 ```
 
 - `velo-core`: domain types (download, segment, category, queue, settings, engine events). No I/O.
-- `velo-engine`: tokio + reqwest. Probes a URL, plans segments (when a worker is idle it splits the segment with the largest remaining range in half), downloads each range into `<temp>/<download id>/<segment id>.part`, then merges the parts in order, checks the size and renames into place. The segment planner is a pure function with property tests.
+- `velo-engine`: tokio + reqwest. Probes a URL, plans segments (when a worker is idle it splits the segment with the largest remaining range in half), writes each range at its offset into one sparse file, `<save path>.velo-tmp` (`velo_platform::preallocate`), then syncs it, checks the size and renames it into place; there is no merge step. The segment planner is a pure function with property tests.
 - `velo-store`: SQLite (download list and segment state) and TOML (settings).
 - `velo-mux`: joins a fragmented MP4 video stream and an M4A sound stream into one MP4 without re-encoding (both `trak`s in one `moov`, fragments interleaved by decode time, the length given once in `mehd`), falling back to an `ffmpeg` on `PATH`. Its `testing` feature builds small fragmented streams for tests.
 - Expiring addresses: a download with a `velo_core::Source` (a YouTube video and its itags) gets its current address from the engine's `Resolver` before every start; `velo-extract`'s `Extractor` is that resolver in the app and the CLI, so the engine never depends on `velo-extract`. A source with two itags (video, sound) is downloaded stream by stream into `<temp>/<id>/stream-<n>`, then joined with `velo-mux` into the save path. `Source::max_request_size` caps each range request (YouTube: 10 MiB), via `Options::max_request_size`.
@@ -76,6 +76,6 @@ Every feature must behave the same on Windows, macOS and Linux. **All OS-specifi
 
 ## Invariants
 
-- A finished file only appears at its save path after all parts are merged and its size matches the server's; until then it lives in the temp directory, so a crash never leaves a truncated file under the real name.
-- On resume, the size of each part file on disk is the source of truth for that segment's progress. If the server's `ETag` or `Last-Modified` changed, the download restarts.
+- A finished file only appears at its save path after every segment is done, the file is synced and its size matches the server's; until then it is `<save path>.velo-tmp`, so a crash never leaves a truncated file under the real name. A name whose `.velo-tmp` exists counts as taken.
+- On resume, each segment's saved `downloaded` is the source of truth, so it may only count bytes synced to disk: the data file is synced once a second (one sync for all workers) and only bytes written before a sync count as durable (`Progress::durable_snapshot`), and only durable progress is saved. If the server's `ETag` or `Last-Modified` changed, or the `.velo-tmp` is gone, the download restarts.
 - Stored formats (SQLite schema with `PRAGMA user_version`, settings TOML, IPC and native-messaging messages) change only with a migration or a breaking-change commit.

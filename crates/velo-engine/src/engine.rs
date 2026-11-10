@@ -20,11 +20,39 @@ use velo_core::{
     Source,
 };
 
-use crate::download::{RunContext, Stage, remove_dir, run};
+use crate::download::{RunContext, Stage, remove_dir, remove_file, run};
 use crate::scheduler;
 use velo_core::Settings;
 
 use crate::{Error, Limiter, Options, Progress, RequestOptions, Result, client_with};
+
+/// Whether `download` writes into `<save path>.velo-tmp` that it reserved: a plain download
+/// once it has segments. A video's streams are in its temp folder; it reserves its name only to
+/// join them, which runs to the end once started, so a `.velo-tmp` at its name may be another
+/// download's.
+fn has_claimed(download: &Download) -> bool {
+    let streams =
+        matches!(&download.source, Some(Source::YouTube { itags, .. }) if itags.len() >= 2);
+    !streams && !download.segments.is_empty()
+}
+
+/// Gives a settled `download` the file name `name`. A claimed unfinished file moves with it, so
+/// the download never resumes into another download's file; if it can't be moved the name stays.
+fn rename(download: &mut Download, name: &str) {
+    if name == download.file_name {
+        return;
+    }
+    if has_claimed(download) {
+        if crate::temp_path(&download.save_path()).exists() {
+            // On failure (logged) the download keeps its name and file.
+            let _ = crate::download::move_claim(download, name);
+            return;
+        }
+        // Its bytes are gone; start over under the new name rather than trust its segments.
+        download.segments.clear();
+    }
+    download.file_name = name.to_string();
+}
 
 /// Gives `download` its current address from its source, if it has one, and returns the
 /// addresses of all its streams (none for a plain download).
@@ -62,7 +90,7 @@ const SCHEDULE_EVERY: u64 = 4;
 /// What the engine needs to run downloads.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// Folder holding each download's part-file folder.
+    /// Folder holding a video's streams while they download, one folder per download.
     pub temp_dir: PathBuf,
     /// Connections, segment size, speed limit, user agent and proxy.
     pub settings: Settings,
@@ -230,7 +258,7 @@ impl Engine {
         self.send(Command::Resume(id));
     }
 
-    /// Pauses a running download; its part files stay for a later resume.
+    /// Pauses a running download; its unfinished file stays for a later resume.
     pub fn pause(&self, id: DownloadId) {
         self.send(Command::Pause(id));
     }
@@ -240,7 +268,7 @@ impl Engine {
         self.send(Command::PauseAll);
     }
 
-    /// Deletes a download and its part files, and with `delete_file` also its finished file.
+    /// Deletes a download and its unfinished file, and with `delete_file` also its finished file.
     pub fn delete(&self, id: DownloadId, delete_file: bool) {
         self.send(Command::Delete { id, delete_file });
     }
@@ -844,10 +872,11 @@ impl Actor {
                 downloaded,
                 total: entry.download.total_size,
                 rate: running.rate.update(now, downloaded),
-                segments: segments.clone(),
+                segments,
             }));
             if save && entry.download.state == DownloadState::Downloading {
-                entry.download.segments = segments;
+                // A resume after a crash starts from these, so only synced bytes count.
+                entry.download.segments = running.progress.durable_snapshot();
                 events.push(EngineEvent::Changed(entry.download.clone()));
             }
         }
@@ -856,7 +885,7 @@ impl Actor {
         }
     }
 
-    /// Forgets download `id` and deletes its part files, and with `delete_file` its finished
+    /// Forgets download `id` and deletes its unfinished file, and with `delete_file` its finished
     /// file, in the background.
     fn remove(&mut self, id: DownloadId, delete_file: bool) {
         let Some(entry) = self.downloads.remove(&id) else {
@@ -869,8 +898,13 @@ impl Actor {
         let parts = self.config.temp_dir.join(id.0.to_string());
         let file =
             (delete_file && entry.download.is_finished()).then(|| entry.download.save_path());
+        let data = (!entry.download.is_finished() && has_claimed(&entry.download))
+            .then(|| crate::temp_path(&entry.download.save_path()));
         tokio::spawn(async move {
             let _ = remove_dir(&parts).await;
+            if let Some(data) = data {
+                let _ = remove_file(&data).await;
+            }
             if let Some(file) = file {
                 let _ = tokio::fs::remove_file(file).await;
             }
@@ -915,7 +949,7 @@ impl Actor {
                 .as_deref()
                 .and_then(crate::sanitize_file_name)
             {
-                download.file_name = name;
+                rename(download, &name);
             }
             if let Some(url) = edit.url.filter(|u| reqwest::Url::parse(u).is_ok()) {
                 download.url = url;

@@ -11,6 +11,7 @@ publish.workspace = true
 velo-core.workspace = true
 velo-log.workspace = true
 velo-mux.workspace = true
+velo-platform.workspace = true
 base64.workspace = true
 chrono.workspace = true
 percent-encoding.workspace = true

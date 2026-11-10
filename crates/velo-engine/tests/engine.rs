@@ -151,7 +151,7 @@ async fn a_paused_download_resumes_after_an_engine_restart() {
     let paused = wait_for_state(&mut events, id, |s| *s == DownloadState::Paused).await;
     let saved = paused.downloaded();
     assert!(saved >= 50_000 && saved < SIZE as u64, "{saved}");
-    assert!(root.path().join("temp").join(id.0.to_string()).is_dir());
+    assert!(velo_engine::temp_path(&paused.save_path()).is_file());
     first.shutdown().await;
 
     // What a store would hold: the last Changed event.
@@ -160,6 +160,98 @@ async fn a_paused_download_resumes_after_an_engine_restart() {
     second.resume(id);
     let done = wait_for_state(&mut events, id, |s| *s == DownloadState::Complete).await;
     assert!(fs::read(finished(&done)).unwrap() == body());
+}
+
+#[tokio::test]
+async fn a_paused_download_whose_unfinished_file_is_gone_starts_over() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+    let id = engine.add(new_download(
+        root.path(),
+        format!("{base}/slower/data.bin"),
+        true,
+    ));
+
+    wait_for_bytes(&mut events, id, 50_000).await;
+    engine.pause(id);
+    let paused = wait_for_state(&mut events, id, |s| *s == DownloadState::Paused).await;
+    assert!(paused.downloaded() > 0);
+    // As when the user deletes it, or after an upgrade from part files: the saved bytes are
+    // gone, so they must be fetched again, not left as zeros.
+    fs::remove_file(velo_engine::temp_path(&paused.save_path())).unwrap();
+
+    engine.resume(id);
+    let done = wait_for_state(&mut events, id, |s| *s == DownloadState::Complete).await;
+    assert!(fs::read(finished(&done)).unwrap() == body());
+}
+
+#[tokio::test]
+async fn a_renamed_paused_download_keeps_its_bytes_and_never_shares_a_file() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+    let id = engine.add(new_download(
+        root.path(),
+        format!("{base}/slower/data.bin"),
+        true,
+    ));
+    wait_for_bytes(&mut events, id, 50_000).await;
+    engine.pause(id);
+    let paused = wait_for_state(&mut events, id, |s| *s == DownloadState::Paused).await;
+    let save_dir = paused.save_dir.clone();
+    // Another download is writing to the name the user picks.
+    fs::write(save_dir.join("other.bin.velo-tmp"), b"not ours").unwrap();
+
+    engine.edit(
+        id,
+        velo_engine::DownloadEdit {
+            file_name: Some("other.bin".into()),
+            ..Default::default()
+        },
+    );
+    let renamed = wait_for(&mut events, |e| match e {
+        EngineEvent::Changed(d) if d.id == id && d.file_name != paused.file_name => Some(d.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(renamed.file_name, "other (1).bin");
+    assert_eq!(renamed.downloaded(), paused.downloaded());
+    assert!(!velo_engine::temp_path(&paused.save_path()).exists());
+
+    engine.resume(id);
+    let done = wait_for_state(&mut events, id, |s| *s == DownloadState::Complete).await;
+    assert!(fs::read(finished(&done)).unwrap() == body());
+    assert_eq!(
+        fs::read(save_dir.join("other.bin.velo-tmp")).unwrap(),
+        b"not ours"
+    );
+}
+
+#[tokio::test]
+async fn a_taken_save_path_moves_the_unfinished_file_to_a_free_name() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let engine = engine(root.path(), Vec::new());
+    let mut events = engine.subscribe();
+    let id = engine.add(new_download(
+        root.path(),
+        format!("{base}/slower/data.bin"),
+        true,
+    ));
+    wait_for_bytes(&mut events, id, 50_000).await;
+    engine.pause(id);
+    let paused = wait_for_state(&mut events, id, |s| *s == DownloadState::Paused).await;
+    fs::write(paused.save_path(), b"someone else's").unwrap();
+
+    engine.resume(id);
+    let done = wait_for_state(&mut events, id, |s| *s == DownloadState::Complete).await;
+    assert_eq!(done.file_name, "data (1).bin");
+    assert!(fs::read(finished(&done)).unwrap() == body());
+    assert_eq!(fs::read(paused.save_path()).unwrap(), b"someone else's");
+    assert!(!velo_engine::temp_path(&paused.save_path()).exists());
 }
 
 #[tokio::test]
@@ -187,7 +279,7 @@ async fn a_changed_file_on_the_server_restarts_the_download() {
 }
 
 #[tokio::test]
-async fn deleting_a_running_download_removes_its_parts() {
+async fn deleting_a_running_download_removes_its_unfinished_file() {
     let base = support::start().await;
     let root = tempfile::tempdir().unwrap();
     let engine = engine(root.path(), Vec::new());
@@ -204,15 +296,20 @@ async fn deleting_a_running_download_removes_its_parts() {
         (*e == EngineEvent::Removed(id)).then_some(())
     })
     .await;
-    // The parts are deleted in the background.
-    let parts = root.path().join("temp").join(id.0.to_string());
+    // The unfinished file is deleted in the background.
+    let save_dir = root.path().join("save");
+    let leftovers = || {
+        fs::read_dir(&save_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
     for _ in 0..100 {
-        if !parts.exists() {
+        if leftovers() == 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(!parts.exists());
+    assert_eq!(leftovers(), 0);
     assert!(!root.path().join("save").join("data.bin").exists());
 }
 

@@ -21,7 +21,8 @@ pub enum DownloadState {
     Downloading,
     /// Stopped by the user; can be resumed.
     Paused,
-    /// All segments are done and the part files are being joined.
+    /// All segments are done; the file is being checked and moved into place, or a video's
+    /// streams joined.
     Merging,
     /// The file is at its save path.
     Complete,
@@ -102,7 +103,7 @@ impl Download {
         self.state == DownloadState::Complete
     }
 
-    /// Whether the download is being probed, fetched or merged.
+    /// Whether the download is being probed, fetched or finished.
     pub fn is_running(&self) -> bool {
         matches!(
             self.state,

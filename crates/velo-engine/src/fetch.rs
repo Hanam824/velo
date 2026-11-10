@@ -1,4 +1,4 @@
-//! Downloads one byte range over one connection into a part file.
+//! Downloads one byte range over one connection into a file.
 
 use std::io::SeekFrom;
 use std::path::Path;
@@ -12,31 +12,30 @@ use tokio_util::sync::CancellationToken;
 use crate::probe::content_range_start;
 use crate::{Error, Limiter, Result};
 
-/// Downloads bytes `[start, end)` of `url`, where `range` is `(start, end)`, into `part_path`,
-/// appending after the bytes the part
-/// file already holds, and returns the part file's final length.
+/// Downloads bytes `[start, end)` of `url`, where `range` is `(start, end)`, into `path`,
+/// appending after the bytes the file already holds, and returns the file's final length.
 ///
-/// The part file's size on disk is the source of truth for progress: a part file holding `n`
+/// The file's size on disk is the source of truth for progress: a file holding `n`
 /// bytes resumes at `start + n`, and one already longer than the range is cut back to it. With
 /// `end` set to `None` the download runs to the end of the file. A request that doesn't start at
 /// offset 0, or has an `end`, is a range request and needs a matching `206` answer; for a server
-/// without range support, pass `start` 0, `end` `None` and an empty part file.
+/// without range support, pass `start` 0, `end` `None` and an empty file.
 ///
 /// Every chunk passes each of `limiters` first. `on_progress` is called with the number of
 /// bytes written after each chunk. Returns
 /// [`Error::Incomplete`] if the connection ends early, and [`Error::Cancelled`] once `cancel` is
-/// cancelled; the bytes received so far stay in the part file for the next attempt.
+/// cancelled; the bytes received so far stay in the file for the next attempt.
 pub async fn fetch_range(
     client: &Client,
     url: &Url,
-    part_path: &Path,
+    path: &Path,
     range: (u64, Option<u64>),
     limiters: &[Limiter],
     cancel: &CancellationToken,
     mut on_progress: impl FnMut(u64),
 ) -> Result<u64> {
     let (start, end) = range;
-    if let Some(dir) = part_path.parent() {
+    if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).await?;
     }
     // Not append mode: Windows can't truncate a file opened for appending.
@@ -44,7 +43,7 @@ pub async fn fetch_range(
         .create(true)
         .truncate(false)
         .write(true)
-        .open(part_path)
+        .open(path)
         .await?;
     let mut have = file.metadata().await?.len();
     if let Some(end) = end {

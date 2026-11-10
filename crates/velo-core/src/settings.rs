@@ -18,7 +18,7 @@ pub struct Settings {
     /// Smallest range the planner gives a new connection, in bytes; a segment is split only if
     /// both halves would be at least this long.
     pub min_segment_size: u64,
-    /// Folder for part files; the platform's cache directory if unset.
+    /// Folder for a video's streams while they download; the platform's cache directory if unset.
     pub temp_dir: Option<PathBuf>,
     /// Folder for downloads whose category has no folder; the platform's downloads folder if unset.
     pub download_dir: Option<PathBuf>,

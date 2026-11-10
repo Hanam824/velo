@@ -197,7 +197,7 @@ fn fill(window: &ProgressWindow, download: &Download, table: &DownloadTable) {
             DownloadState::Probing => "Connecting…".into(),
             DownloadState::Downloading => "Receiving data…".into(),
             DownloadState::Paused => "Paused".into(),
-            DownloadState::Merging => "Joining the parts…".into(),
+            DownloadState::Merging => "Finishing…".into(),
             DownloadState::Complete => "Complete".into(),
             DownloadState::Failed(message) => message.clone(),
         }
