@@ -1,6 +1,6 @@
 ---
 name: create-commit-message
-description: Write a git commit message for the staged changes following Conventional Commits 1.0.0 (type(scope)!: description, body, footers). Use when committing, or when the user asks for a commit message.
+description: Write a git commit message for the staged changes following Conventional Commits 1.0.0 (type(scope): description, body, footers). Use when committing, or when the user asks for a commit message.
 ---
 
 # Create commit message
@@ -23,26 +23,29 @@ Write commit messages that follow [Conventional Commits 1.0.0](https://www.conve
 ## Format
 
 ```
-<type>[optional scope][!]: <description>
+<type>[optional scope]: <description>
 
 # Summary
 - <change 1>
 - <change 2>
 
+# BREAKING CHANGE
+- <what breaks>
+
 [optional footer(s)]
 ```
 
-The body always starts with a `# Summary` heading, followed by a bulleted list of the main changes, one per bullet.
+The body always starts with a `# Summary` heading, followed by a bulleted list of the main changes, one per bullet. A breaking change adds a `# BREAKING CHANGE` heading after it, with one bullet per thing that breaks; leave the heading out otherwise.
 
 ### Rules (from the spec)
 
-- The header is `type`, an optional `(scope)`, an optional `!`, then `: ` and the description.
+- The header is `type`, an optional `(scope)`, then `: ` and the description. Don't use the spec's `!` marker in this repo.
 - **description**: a short summary right after `: `. Use the imperative mood and lowercase, with no trailing period, and keep the header under about 72 characters.
 - **body**: optional by the spec (always present in this repo, as `# Summary`). It starts after one blank line. Explain *what* changed and *why*, not how.
-- **footers**: optional. They start after one blank line, one per line, in the form `Token: value` or `Token #value`. Tokens use `-` instead of spaces (e.g. `Reviewed-by`, `Refs`). The one exception is `BREAKING CHANGE`.
-- **Breaking changes**: mark them with `!` before the `:` (e.g. `feat(store)!: ...`), with a `BREAKING CHANGE: <description>` footer, or both. `BREAKING-CHANGE` is a valid synonym. Any type can be breaking.
+- **footers**: optional. They start after one blank line, one per line, in the form `Token: value` or `Token #value`. Tokens use `-` instead of spaces (e.g. `Reviewed-by`, `Refs`).
+- **Breaking changes**: say what breaks under a `# BREAKING CHANGE` heading in the body (a repo rule; the spec's `!` and `BREAKING CHANGE:` footer are not used here). Any type can be breaking.
 - `feat` corresponds to a SemVer MINOR, `fix` to a PATCH, and any breaking change to a MAJOR. (Release versions are chosen by hand when running the Release workflow, `release.yml`.)
-- Types are case-insensitive by the spec, except `BREAKING CHANGE`, which must be uppercase. Use lowercase types in this repo.
+- Types are case-insensitive by the spec. Use lowercase types in this repo.
 
 ### Types
 
@@ -64,7 +67,7 @@ Only `feat` and `fix` are defined by the spec; the others are the common [@commi
 
 ### Format changes are breaking
 
-Changing a stored format (the SQLite schema in `velo-store`, the settings TOML, the part-file layout, or the `velo-ipc` / native-messaging message shapes) can break existing installs or an older browser extension, so mark it as breaking unless a migration handles it (see the format-stability rule in CLAUDE.md).
+Changing a stored format (the SQLite schema in `velo-store`, the settings TOML, the `.velo-tmp` data file, or the `velo-ipc` / native-messaging message shapes) can break existing installs or an older browser extension, so describe it under `# BREAKING CHANGE` unless a migration handles it (see the format-stability rule in CLAUDE.md).
 
 ## Examples
 
@@ -88,13 +91,14 @@ Refs: https://github.com/<owner>/<repo>/issues/12
 ```
 
 ```
-feat(ipc)!: send cookies as a list in download requests
+feat(ipc): send cookies as a list in download requests
 
 # Summary
 - Replace the cookie header string with a list of name/value pairs
 - Update the native-messaging host and the extension
 
-BREAKING CHANGE: extensions older than this release can't add downloads.
+# BREAKING CHANGE
+- Extensions older than this release can't add downloads.
 ```
 
 ## Repo-specific

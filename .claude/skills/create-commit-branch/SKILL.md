@@ -18,7 +18,7 @@ Name branches with the same types used in commit messages ([Conventional Commits
 - **short-description**: 2–5 words in kebab-case.
 - Lowercase only, with `-` between words and a single `/` after the type. No spaces, underscores, or trailing slashes.
 - Keep it under about 50 characters.
-- For a breaking change, add `!` to the commit message, not to the branch name, because `!` is awkward in shell commands.
+- A breaking change doesn't show in the branch name; it goes under `# BREAKING CHANGE` in the commit message.
 
 ## Steps
 
