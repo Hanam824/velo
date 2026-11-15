@@ -87,6 +87,31 @@ async fn cut_off_connections_are_retried() {
 }
 
 #[tokio::test]
+async fn a_stalled_connection_is_retried() {
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    // Building the engine's client installs the TLS provider this one needs too; its own read
+    // timeout (`velo_engine::READ_TIMEOUT`) is too long for a test.
+    client().unwrap();
+    let impatient = reqwest::Client::builder()
+        .read_timeout(Duration::from_millis(200))
+        .build()
+        .unwrap();
+    let path = download_file(
+        &impatient,
+        &format!("{base}/stall/data.bin"),
+        &root.path().join("temp"),
+        DownloadId(1),
+        root.path(),
+        &options(),
+        &Progress::default(),
+    )
+    .await
+    .unwrap();
+    assert!(fs::read(path).unwrap() == body());
+}
+
+#[tokio::test]
 async fn a_server_that_keeps_failing_gives_up_and_keeps_the_file() {
     let (root, progress, result) = download("/fail/data.bin", &options()).await;
     assert!(

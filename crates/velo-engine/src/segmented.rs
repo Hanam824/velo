@@ -20,7 +20,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use velo_core::{Segment, SegmentId, SegmentState, Settings};
 
-use crate::fetch::{cancellable, send_range};
+use crate::fetch::{WRITE_BUFFER, cancellable, send_range};
 use crate::{Error, Limiter, Result, planner};
 
 /// How a segmented download runs.
@@ -302,8 +302,6 @@ pub async fn download_segments(
 
 /// How often the data file is synced to disk.
 const SYNC_INTERVAL: Duration = Duration::from_secs(1);
-/// Bytes a worker buffers before it hands them to the OS.
-const WRITE_BUFFER: usize = 256 << 10;
 
 /// Syncs `data` to disk and counts every byte written before the sync as durable.
 async fn sync(data: &Arc<std::fs::File>, progress: &Progress) -> Result<()> {

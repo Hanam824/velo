@@ -9,6 +9,8 @@
 //! - `/redirect`: redirects to `/files/redirected.bin`.
 //! - `/slow/{name}`: like `/files`, sent in 8 KiB chunks 2 ms apart, so connections overlap.
 //! - `/flaky/{name}`: like `/slow`, but every other `GET` stops halfway through its range.
+//! - `/stall/{name}`: like `/slow`, but every other `GET` goes silent halfway through its range
+//!   without closing the connection.
 //! - `/fail/{name}`: answers `HEAD` like `/files`, but every `GET` with `503`.
 //! - `/slower/{name}`: like `/slow`, in 2 KiB chunks 10 ms apart: a file takes several of the
 //!   engine's 250 ms progress intervals, so a test can pause or delete it mid-way.
@@ -122,6 +124,8 @@ enum Cut {
     Never,
     /// Fails halfway through.
     Half,
+    /// Sends half, then nothing more, and keeps the connection open.
+    Stall,
     /// Fails after this many bytes.
     After(usize),
 }
@@ -130,6 +134,7 @@ enum Cut {
 pub async fn start() -> String {
     let gets = Arc::new(AtomicUsize::new(0));
     let slow_gets = Arc::new(AtomicUsize::new(0));
+    let stall_gets = Arc::new(AtomicUsize::new(0));
     let version = Arc::new(AtomicUsize::new(0));
     let bump = Arc::clone(&version);
     let app = Router::new()
@@ -239,6 +244,18 @@ pub async fn start() -> String {
                     let cut = method == Method::GET
                         && gets.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
                     trickle(response, if cut { Cut::Half } else { Cut::Never }, SLOW).await
+                }
+            }),
+        )
+        .route(
+            "/stall/{name}",
+            get(move |method: Method, headers: HeaderMap| {
+                let gets = Arc::clone(&stall_gets);
+                async move {
+                    let response = serve(&method, &headers, &body(), true, &[]);
+                    let stall = method == Method::GET
+                        && gets.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
+                    trickle(response, if stall { Cut::Stall } else { Cut::Never }, SLOW).await
                 }
             }),
         )
@@ -354,14 +371,18 @@ async fn trickle(response: Response<Body>, cut: Cut, pace: Pace) -> Response<Bod
     let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
     let stop = match cut {
         Cut::Never => bytes.len(),
-        Cut::Half => bytes.len() / 2,
+        Cut::Half | Cut::Stall => bytes.len() / 2,
         Cut::After(n) => bytes.len().min(n),
     };
+    let stall = matches!(cut, Cut::Stall);
     let cut = stop < bytes.len();
     let chunks = futures_util::stream::unfold(0, move |sent| {
         let bytes = bytes.clone();
         async move {
             if sent >= stop {
+                if stall && cut {
+                    std::future::pending::<()>().await;
+                }
                 // After the error the stream ends; `usize::MAX` marks that.
                 return (cut && sent != usize::MAX).then(|| {
                     let error = std::io::Error::other("connection cut by the test server");

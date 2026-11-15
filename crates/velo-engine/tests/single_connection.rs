@@ -5,8 +5,7 @@ mod support;
 use std::fs;
 
 use reqwest::{StatusCode, Url};
-use velo_engine::planner::initial_segments;
-use velo_engine::{CancellationToken, Error, client, fetch_range, probe};
+use velo_engine::{CancellationToken, Error, client, fetch_whole, probe};
 
 use support::{ETAG_VALUE, LAST_MODIFIED_VALUE, SIZE, body};
 
@@ -74,132 +73,37 @@ async fn probe_handles_empty_files_and_reports_error_statuses() {
 }
 
 #[tokio::test]
-async fn a_probed_file_downloads_into_its_file() {
-    let base = support::start().await;
-    let temp = tempfile::tempdir().unwrap();
-    let client = client().unwrap();
-    let probe = probe(&client, &format!("{base}/files/data.bin"))
-        .await
-        .unwrap();
-    let total = probe.total_size.unwrap();
-    let segment = &initial_segments(total)[0];
-    let part = temp.path().join("7").join("data.bin.velo-tmp");
-
-    let mut progress = 0;
-    let len = fetch_range(
-        &client,
-        &probe.url,
-        &part,
-        (segment.start, Some(segment.end)),
-        &[],
-        &CancellationToken::new(),
-        |n| progress += n,
-    )
-    .await
-    .unwrap();
-    assert_eq!((len, progress), (total, total));
-    assert!(fs::read(&part).unwrap() == body());
-}
-
-#[tokio::test]
-async fn a_fetch_resumes_after_the_bytes_already_in_the_part_file() {
-    let base = support::start().await;
-    let temp = tempfile::tempdir().unwrap();
-    let client = client().unwrap();
-    let url = Url::parse(&format!("{base}/files/data.bin")).unwrap();
-    let expected = body();
-
-    // The whole file, with the first 1000 bytes already on disk.
-    let whole = temp.path().join("whole.part");
-    fs::write(&whole, &expected[..1000]).unwrap();
-    let mut progress = 0;
-    let len = fetch_range(
-        &client,
-        &url,
-        &whole,
-        (0, Some(SIZE as u64)),
-        &[],
-        &CancellationToken::new(),
-        |n| progress += n,
-    )
-    .await
-    .unwrap();
-    assert_eq!((len, progress), (SIZE as u64, SIZE as u64 - 1000));
-    assert!(fs::read(&whole).unwrap() == expected);
-
-    // A middle range, to the end of the file.
-    let middle = temp.path().join("middle.part");
-    fs::write(&middle, &expected[5000..5100]).unwrap();
-    fetch_range(
-        &client,
-        &url,
-        &middle,
-        (5000, None),
-        &[],
-        &CancellationToken::new(),
-        |_| {},
-    )
-    .await
-    .unwrap();
-    assert!(fs::read(&middle).unwrap() == expected[5000..]);
-}
-
-#[tokio::test]
-async fn a_part_file_longer_than_its_range_is_cut_back() {
-    let base = support::start().await;
-    let temp = tempfile::tempdir().unwrap();
-    let url = Url::parse(&format!("{base}/files/data.bin")).unwrap();
-    let part = temp.path().join("long.part");
-    fs::write(&part, &body()[100..3100]).unwrap();
-
-    let len = fetch_range(
-        &client().unwrap(),
-        &url,
-        &part,
-        (100, Some(2100)),
-        &[],
-        &CancellationToken::new(),
-        |_| {},
-    )
-    .await
-    .unwrap();
-    assert_eq!(len, 2000);
-    assert!(fs::read(&part).unwrap() == body()[100..2100]);
-}
-
-#[tokio::test]
-async fn a_server_without_ranges_downloads_whole_but_cannot_resume() {
+async fn a_server_without_ranges_downloads_whole_from_the_first_byte() {
     let base = support::start().await;
     let temp = tempfile::tempdir().unwrap();
     let client = client().unwrap();
     let url = Url::parse(&format!("{base}/norange/data.bin")).unwrap();
 
-    let part = temp.path().join("whole.part");
-    let len = fetch_range(
-        &client,
-        &url,
-        &part,
-        (0, None),
-        &[],
-        &CancellationToken::new(),
-        |_| {},
-    )
+    // Bytes of an earlier attempt can't be resumed: they are replaced.
+    let file = temp.path().join("7").join("data.bin.velo-tmp");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, vec![0xAA; SIZE + 10]).unwrap();
+    let mut progress = 0;
+    let len = fetch_whole(&client, &url, &file, &[], &CancellationToken::new(), |n| {
+        progress += n
+    })
     .await
     .unwrap();
-    assert_eq!(len, SIZE as u64);
-    assert!(fs::read(&part).unwrap() == body());
+    assert_eq!((len, progress), (SIZE as u64, SIZE as u64));
+    assert!(fs::read(&file).unwrap() == body());
 
-    let partial = temp.path().join("partial.part");
-    fs::write(&partial, &body()[..10]).unwrap();
-    let resumed = fetch_range(
+    let missing = Url::parse(&format!("{base}/missing")).unwrap();
+    let refused = fetch_whole(
         &client,
-        &url,
-        &partial,
-        (0, None),
+        &missing,
+        &file,
         &[],
         &CancellationToken::new(),
         |_| {},
     )
     .await;
-    assert!(matches!(resumed, Err(Error::RangeIgnored)), "{resumed:?}");
+    assert!(
+        matches!(refused, Err(Error::Status(StatusCode::NOT_FOUND))),
+        "{refused:?}"
+    );
 }
