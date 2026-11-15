@@ -1,114 +1,68 @@
-//! Downloads one byte range over one connection into a file.
+//! Requests over one connection: a whole file into a file, and a byte range.
 
-use std::io::SeekFrom;
 use std::path::Path;
 
-use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use reqwest::header::{CONTENT_RANGE, RANGE};
 use reqwest::{Client, Response, StatusCode, Url};
 use tokio::fs::{self, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio_util::sync::CancellationToken;
 
 use crate::probe::content_range_start;
 use crate::{Error, Limiter, Result};
 
-/// Downloads bytes `[start, end)` of `url`, where `range` is `(start, end)`, into `path`,
-/// appending after the bytes the file already holds, and returns the file's final length.
+/// Bytes a download buffers before it hands them to the OS.
+pub(crate) const WRITE_BUFFER: usize = 256 << 10;
+
+/// Downloads all of `url` over one connection into `path`, replacing what the file holds, and
+/// returns the file's length.
 ///
-/// The file's size on disk is the source of truth for progress: a file holding `n`
-/// bytes resumes at `start + n`, and one already longer than the range is cut back to it. With
-/// `end` set to `None` the download runs to the end of the file. A request that doesn't start at
-/// offset 0, or has an `end`, is a range request and needs a matching `206` answer; for a server
-/// without range support, pass `start` 0, `end` `None` and an empty file.
-///
-/// Every chunk passes each of `limiters` first. `on_progress` is called with the number of
-/// bytes written after each chunk. Returns
-/// [`Error::Incomplete`] if the connection ends early, and [`Error::Cancelled`] once `cancel` is
-/// cancelled; the bytes received so far stay in the file for the next attempt.
-pub async fn fetch_range(
+/// This is for a server without range support, where the only way to fetch is from the first
+/// byte. Every chunk passes each of `limiters` first. `on_progress` is called with the number
+/// of bytes written after each chunk. Returns [`Error::Incomplete`] if the connection ends
+/// before the server's `Content-Length`, and [`Error::Cancelled`] once `cancel` is cancelled.
+pub async fn fetch_whole(
     client: &Client,
     url: &Url,
     path: &Path,
-    range: (u64, Option<u64>),
     limiters: &[Limiter],
     cancel: &CancellationToken,
     mut on_progress: impl FnMut(u64),
 ) -> Result<u64> {
-    let (start, end) = range;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).await?;
     }
-    // Not append mode: Windows can't truncate a file opened for appending.
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
-        .truncate(false)
+        .truncate(true)
         .write(true)
         .open(path)
         .await?;
-    let mut have = file.metadata().await?.len();
-    if let Some(end) = end {
-        let len = end.saturating_sub(start);
-        if have >= len {
-            file.set_len(len).await?;
-            return Ok(len);
-        }
+    let mut response = cancellable(cancel, async {
+        Ok(client.get(url.clone()).send().await.inspect_err(|error| {
+            tracing::warn!(url = velo_log::redact::url(url.as_str()), %error, "request failed");
+        })?)
+    })
+    .await?;
+    if !response.status().is_success() {
+        tracing::warn!(url = velo_log::redact::url(url.as_str()), status = %response.status(), "request refused");
+        return Err(Error::Status(response.status()));
     }
-    file.seek(SeekFrom::Start(have)).await?;
+    let expected = response.content_length();
 
-    let position = start + have;
-    let mut response = if position > 0 || end.is_some() {
-        cancellable(cancel, send_range(client, url, position, end)).await?
-    } else {
-        let response =
-            cancellable(cancel, async { Ok(client.get(url.clone()).send().await?) }).await?;
-        if !response.status().is_success() {
-            tracing::warn!(url = velo_log::redact::url(url.as_str()), status = %response.status(), "request refused");
-            return Err(Error::Status(response.status()));
-        }
-        response
-    };
-    let expected = match end {
-        Some(end) => Some(end - start),
-        None => response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(|len| have + len),
-    };
-
-    let mut writer = BufWriter::new(file);
-    loop {
-        let chunk = match cancellable(cancel, async { Ok(response.chunk().await?) }).await {
-            Ok(Some(chunk)) => chunk,
-            Ok(None) => break,
-            Err(error) => {
-                writer.flush().await?;
-                return Err(error);
-            }
-        };
+    let mut writer = BufWriter::with_capacity(WRITE_BUFFER, file);
+    let mut have = 0;
+    while let Some(chunk) = cancellable(cancel, async { Ok(response.chunk().await?) }).await? {
         for limiter in limiters {
-            if let Err(error) = cancellable(cancel, async {
+            cancellable(cancel, async {
                 limiter.acquire(chunk.len() as u64).await;
                 Ok(())
             })
-            .await
-            {
-                writer.flush().await?;
-                return Err(error);
-            }
+            .await?;
         }
-        // A server may send more than asked for; keep only the requested range.
-        let take = match expected {
-            Some(expected) if end.is_some() => chunk.len().min((expected - have) as usize),
-            _ => chunk.len(),
-        };
-        writer.write_all(&chunk[..take]).await?;
-        have += take as u64;
-        on_progress(take as u64);
-        if end.is_some() && Some(have) == expected {
-            break;
-        }
+        writer.write_all(&chunk).await?;
+        have += chunk.len() as u64;
+        on_progress(chunk.len() as u64);
     }
     writer.flush().await?;
 

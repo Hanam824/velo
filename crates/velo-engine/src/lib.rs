@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Once;
+use std::time::Duration;
 
 use velo_core::{ProxyMode, Settings};
 
@@ -18,7 +19,7 @@ mod segmented;
 
 pub use download::download_file;
 pub use engine::{DownloadEdit, Engine, EngineConfig, NewDownload, RetryPolicy};
-pub use fetch::fetch_range;
+pub use fetch::fetch_whole;
 pub use filename::{file_name, sanitize_file_name, unique_file_name};
 pub use finish::{finish, temp_path};
 pub use limiter::Limiter;
@@ -87,10 +88,20 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 ///
 /// It verifies certificates against the operating system's trust store, follows redirects and
 /// identifies itself as `Velo/<version>`. Responses are never decompressed, so byte offsets
-/// match the file on the server.
+/// match the file on the server. It speaks HTTP/1.1 only, so every request of a download has a
+/// TCP connection of its own (HTTP/2 would put them all on one), and gives up on a connection
+/// that can't be made within [`CONNECT_TIMEOUT`] or sends nothing for [`READ_TIMEOUT`].
 pub fn client() -> Result<reqwest::Client> {
     client_with(&Settings::default(), &RequestOptions::default())
 }
+
+/// How long connecting to a server may take.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a server may send nothing before the request fails, so that a stalled connection is
+/// retried instead of waiting forever. It only runs while waiting for bytes, so it limits
+/// neither the length of a download nor a speed limit's pauses.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Builds a client like [`client`] that uses the user agent and proxy from `settings` and
 /// sends `request`'s headers with every request.
@@ -101,6 +112,9 @@ pub fn client_with(settings: &Settings, request: &RequestOptions) -> Result<reqw
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
     let mut builder = reqwest::Client::builder()
+        .http1_only()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
         .user_agent(
             settings
                 .user_agent

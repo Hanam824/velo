@@ -9,7 +9,7 @@ use velo_core::{Download, DownloadId, Segment, SegmentId, SegmentState};
 
 use crate::fetch::cancellable;
 use crate::{
-    Error, Options, Progress, Result, download_segments, fetch_range, finish, planner, probe,
+    Error, Options, Progress, Result, download_segments, fetch_whole, finish, planner, probe,
     temp_path, unique_file_name,
 };
 
@@ -61,7 +61,7 @@ pub(crate) enum Stage {
     /// The server answered the probe; the download's metadata and file name are filled in.
     Probed,
     /// Every byte is in; the file is being checked, or a video's streams joined.
-    Merging,
+    Finishing,
 }
 
 /// Runs `download` once: probes the server, downloads what is missing and moves the file into
@@ -89,7 +89,7 @@ pub(crate) async fn run(
         // Part files from versions that joined them at the end; they can't be resumed.
         remove_dir(&dir).await?;
         let (total, data) = fetch(context, download, None, &mut on_stage).await?;
-        on_stage(Stage::Merging, download);
+        on_stage(Stage::Finishing, download);
         let save_path = download.save_path();
         finish(&data, &download.segments, total, &save_path).await?;
         return Ok(save_path);
@@ -112,7 +112,7 @@ pub(crate) async fn run(
         files.push(file);
     }
     download.url.clone_from(&streams[0]);
-    on_stage(Stage::Merging, download);
+    on_stage(Stage::Finishing, download);
     let save_path = claim_save_path(download).await?;
     let joining = temp_path(&save_path);
     let (video, audio, out) = (files[0].clone(), files[1].clone(), joining.clone());
@@ -212,11 +212,10 @@ async fn fetch(
     } else {
         // Without ranges the only way to fetch is from the first byte (its file was emptied).
         let progress = context.progress;
-        fetch_range(
+        fetch_whole(
             context.client,
             &probe.url,
             &data,
-            (0, None),
             &context.options.limiters,
             context.cancel,
             |n| {

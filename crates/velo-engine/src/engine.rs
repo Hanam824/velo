@@ -666,7 +666,7 @@ impl Actor {
     fn on_task(&mut self, message: TaskMessage) {
         let (download, state) = match message {
             TaskMessage::Stage(Stage::Probed, download) => (download, DownloadState::Downloading),
-            TaskMessage::Stage(Stage::Merging, download) => (download, DownloadState::Merging),
+            TaskMessage::Stage(Stage::Finishing, download) => (download, DownloadState::Merging),
             TaskMessage::Done(download, result) => {
                 let state = match result {
                     Ok(_) => DownloadState::Complete,
