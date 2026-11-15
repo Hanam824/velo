@@ -92,6 +92,29 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      # Draws every window and compares it with its reference in crates/velo-gui/snapshots.
+      # Text is drawn with the system's fonts, so only the system the references were made on
+      # compares them. It doesn't fail the job yet: the references were made on a developer's
+      # Windows, and the runner's has to draw the same before this can block a pull request.
+      - name: Compare the windows with their reference pictures
+        id: pictures
+        if: matrix.os == 'windows-latest'
+        continue-on-error: true
+        shell: bash
+        env:
+          VELO_SNAPSHOT_DIR: ${{ runner.temp }}/velo-snapshots
+          VELO_SNAPSHOT_COMPARE: 1
+        # `--workspace --bin velo`, not `-p velo-gui`: the same features as the Test step, so
+        # nothing is compiled again.
+        run: cargo test --workspace --locked --bin velo snapshot -- --ignored
+
+      - name: Keep the pictures that were drawn
+        if: steps.pictures.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: velo-snapshots
+          path: ${{ runner.temp }}/velo-snapshots
+
   # The browser extension (extension/): type check, unit tests and a build of every browser's
   # bundle. Platform-independent, so it runs once.
   extension:

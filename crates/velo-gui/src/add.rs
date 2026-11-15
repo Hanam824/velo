@@ -180,6 +180,16 @@ impl Adder {
         Ok(())
     }
 
+    /// A callback for buttons and menus that shows the Add URL dialog; a failure is logged.
+    pub fn opener(self: &Rc<Self>) -> impl Fn() + 'static {
+        let adder = self.clone();
+        move || {
+            if let Err(error) = adder.open() {
+                tracing::warn!(%error, "couldn't open Add URL");
+            }
+        }
+    }
+
     /// Shows Download File Info for `url` and asks the server about it; Save As follows
     /// `preset` where it names a folder or file name.
     pub fn open_info(
@@ -465,6 +475,22 @@ impl Adder {
         if start && let Some(on_started) = self.on_started.borrow().as_ref() {
             on_started(id);
         }
+    }
+
+    /// The Add URL dialog, if open.
+    #[cfg(test)]
+    pub fn add_url_window(&self) -> Option<AddUrlDialog> {
+        self.add_url.borrow().as_ref().map(|d| d.clone_strong())
+    }
+
+    /// The Download File Info dialog opened last, if any is open.
+    #[cfg(test)]
+    pub fn info_window(&self) -> Option<DownloadInfoDialog> {
+        self.infos
+            .borrow()
+            .values()
+            .next_back()
+            .map(|d| d.clone_strong())
     }
 
     /// Hides Download File Info dialog `number` and forgets it.
