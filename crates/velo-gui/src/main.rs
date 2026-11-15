@@ -11,6 +11,8 @@ mod categories;
 mod category;
 mod complete;
 mod config;
+#[cfg(test)]
+mod flows;
 mod format;
 mod list;
 mod options;
@@ -30,7 +32,7 @@ use velo_engine::RetryPolicy;
 use velo_platform::AppDirs;
 use velo_store::Store;
 
-use crate::add::{Adder, Preset, is_download_url};
+use crate::add::{Adder, Preset, Prober, is_download_url};
 use crate::app::{App, Commands};
 use crate::batch::BatchDialog;
 use crate::bridge::{Bridge, BridgeConfig};
@@ -60,6 +62,69 @@ fn create_window(
         let _ = slint::quit_event_loop();
     });
     Ok((ui, app))
+}
+
+/// Connects the main window's Add URL, Add Batch, Import, Export and Options to their dialogs,
+/// which ask servers about files through `prober`. Returns what opens Add URL and what opens
+/// Options.
+fn wire(
+    ui: &AppWindow,
+    app: &Rc<App>,
+    config: &Rc<Config>,
+    commands: &Rc<dyn Commands>,
+    prober: Rc<dyn Prober>,
+    default_downloads: std::path::PathBuf,
+    default_temp: std::path::PathBuf,
+) -> (Rc<Adder>, Rc<OptionsDialog>) {
+    let adder = Adder::new(config.clone(), commands.clone(), prober);
+    let (shown, show_config) = (Rc::downgrade(app), config.clone());
+    adder.on_started(move |id| {
+        if let Some(app) = shown.upgrade()
+            && show_config.settings().show_progress_dialog
+        {
+            app.show_progress(id);
+        }
+    });
+    let options = OptionsDialog::new(
+        config.clone(),
+        commands.clone(),
+        default_downloads,
+        default_temp,
+    );
+    let main = ui.as_weak();
+    options.on_saved(move |settings| {
+        if let Some(ui) = main.upgrade() {
+            theme::apply(&ui, settings.appearance);
+        }
+    });
+    {
+        let options = options.clone();
+        ui.on_options(move || {
+            if let Err(error) = options.open() {
+                tracing::warn!(%error, "couldn't open Options");
+            }
+        });
+    }
+    ui.on_add_url(adder.opener());
+    let batch = BatchDialog::new(config.clone(), adder.clone());
+    ui.on_add_batch(move || {
+        if let Err(error) = batch.open() {
+            tracing::warn!(%error, "couldn't open Add Batch Download");
+        }
+    });
+    {
+        let (adder, config) = (adder.clone(), config.clone());
+        ui.on_import_list(move || import_list(&adder, &config));
+    }
+    {
+        let (app, config) = (Rc::downgrade(app), config.clone());
+        ui.on_export_list(move || {
+            if let Some(app) = app.upgrade() {
+                export_list(&app.urls(), &config);
+            }
+        });
+    }
+    (adder, options)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -102,59 +167,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (ui, app) = create_window(config.clone(), commands.clone(), Rc::new(SystemDesktop))?;
     app.apply(downloads.into_iter().map(EngineEvent::Added));
     let bridge = Rc::new(bridge);
-    let adder = Adder::new(config.clone(), commands.clone(), bridge.clone());
-    let (shown, show_config) = (Rc::downgrade(&app), config.clone());
-    adder.on_started(move |id| {
-        if let Some(app) = shown.upgrade()
-            && show_config.settings().show_progress_dialog
-        {
-            app.show_progress(id);
-        }
-    });
-    let options = OptionsDialog::new(
-        config.clone(),
-        commands.clone(),
+    // Options stays open-able through the window's callback.
+    let (adder, _options) = wire(
+        &ui,
+        &app,
+        &config,
+        &commands,
+        bridge.clone(),
         dirs.downloads().to_path_buf(),
         dirs.parts().to_path_buf(),
     );
-    let main = ui.as_weak();
-    options.on_saved(move |settings| {
-        if let Some(ui) = main.upgrade() {
-            theme::apply(&ui, settings.appearance);
-        }
-    });
-    ui.on_options(move || {
-        if let Err(error) = options.open() {
-            tracing::warn!(%error, "couldn't open Options");
-        }
-    });
-    let open_add = {
-        let adder = adder.clone();
-        move || {
-            if let Err(error) = adder.open() {
-                tracing::warn!(%error, "couldn't open Add URL");
-            }
-        }
-    };
-    ui.on_add_url(open_add.clone());
-    let batch = BatchDialog::new(config.clone(), adder.clone());
-    ui.on_add_batch(move || {
-        if let Err(error) = batch.open() {
-            tracing::warn!(%error, "couldn't open Add Batch Download");
-        }
-    });
-    {
-        let (adder, config) = (adder.clone(), config.clone());
-        ui.on_import_list(move || import_list(&adder, &config));
-    }
-    {
-        let (app, config) = (Rc::downgrade(&app), config.clone());
-        ui.on_export_list(move || {
-            if let Some(app) = app.upgrade() {
-                export_list(&app.urls(), &config);
-            }
-        });
-    }
 
     // Messages from other processes wait here for the UI thread, which takes them on its timer.
     let (requests_tx, requests) = std::sync::mpsc::channel();
@@ -177,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     show_main(&ui);
                 }
             });
-            tray.on_add_url(open_add);
+            tray.on_add_url(adder.opener());
             tray.on_exit(|| {
                 let _ = slint::quit_event_loop();
             });
@@ -425,8 +447,9 @@ mod tests {
         assert!(!theme.get_dark());
     }
 
-    /// Writes `main-light.png` and `main-dark.png` to `$VELO_SNAPSHOT_DIR`, with a few sample
-    /// downloads in the list; see [`snapshot`].
+    /// Writes a picture of every window to `$VELO_SNAPSHOT_DIR`, the main window with a few
+    /// sample downloads in the list, and compares them with their references if asked; see
+    /// [`snapshot`].
     #[test]
     #[ignore = "installs its own Slint platform; run alone with --ignored"]
     fn snapshot() {
@@ -434,7 +457,7 @@ mod tests {
             std::env::var_os("VELO_SNAPSHOT_DIR").expect("set VELO_SNAPSHOT_DIR"),
         );
         std::fs::create_dir_all(&dir).unwrap();
-        let window = snapshot::init();
+        let mut shots = snapshot::Shots::new(dir);
         let (ui, app) = create_window(
             test_config(),
             Rc::new(Recorder::default()),
@@ -442,6 +465,11 @@ mod tests {
         )
         .unwrap();
         let mb = 1024 * 1024;
+        let last_try = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2026, 10, 26, 14, 3, 0)
+            .earliest()
+            .expect("the afternoon exists in every time zone")
+            .timestamp();
+        assert_eq!(format::date(last_try), "Oct 26 2026 14:03");
         for download in [
             sample(
                 1,
@@ -474,6 +502,10 @@ mod tests {
                 58 * mb,
             ),
         ] {
+            // The list shows the last try in local time: the same clock time in every time
+            // zone draws the same picture. The seconds keep the samples in their order.
+            let mut download = download;
+            download.last_try_at = Some(last_try + download.id.0 as i64);
             app.apply([EngineEvent::Added(download)]);
         }
         app.apply([EngineEvent::Progress(ProgressUpdate {
@@ -487,13 +519,14 @@ mod tests {
         ui.invoke_selection_changed(2);
         for (appearance, name) in [(Appearance::Light, "light"), (Appearance::Dark, "dark")] {
             ui.global::<Theme>().invoke_apply(appearance);
-            snapshot::save(
-                &window,
-                &ui,
-                1100,
-                560,
-                &dir.join(format!("main-{name}.png")),
-            );
+            shots.take(&ui, 1100, 560, &format!("main-{name}"));
+        }
+        // The toolbar's icons follow the selection: a running and a finished download.
+        ui.global::<Theme>().invoke_apply(Appearance::Light);
+        for (id, name) in [(1, "running"), (3, "finished")] {
+            ui.set_selected_id(id);
+            ui.invoke_selection_changed(id);
+            shots.take(&ui, 1100, 560, &format!("main-{name}-selected"));
         }
         ui.hide().unwrap();
 
@@ -504,7 +537,7 @@ mod tests {
             slint::StandardListViewItem::from("https://example.org/report-q3.pdf"),
             slint::StandardListViewItem::from("https://cdn.example.net/album.zip"),
         ])));
-        snapshot::save(&window, &add, 520, 330, &dir.join("add-url.png"));
+        shots.take(&add, 520, 330, "add-url");
         add.hide().unwrap();
 
         let info = DownloadInfoDialog::new().unwrap();
@@ -519,12 +552,12 @@ mod tests {
         info.set_size("5.96 GB".into());
         info.set_kind(FileKind::Program);
         info.set_probing(false);
-        snapshot::save(&window, &info, 600, 260, &dir.join("download-info.png"));
+        shots.take(&info, 600, 260, "download-info");
         info.hide().unwrap();
 
         app.show_progress(DownloadId(1));
         let progress = app.progress_window(DownloadId(1)).unwrap();
-        snapshot::save(&window, &progress, 560, 520, &dir.join("progress.png"));
+        shots.take(&progress, 560, 520, "progress");
         progress.hide().unwrap();
 
         let complete = CompleteWindow::new().unwrap();
@@ -532,7 +565,7 @@ mod tests {
         complete.set_size("3.00 MB".into());
         complete.set_saved_as("/Users/me/Downloads/report-q3.pdf".into());
         complete.set_kind(FileKind::Document);
-        snapshot::save(&window, &complete, 520, 220, &dir.join("complete.png"));
+        shots.take(&complete, 520, 220, "complete");
         complete.hide().unwrap();
 
         let properties = PropertiesWindow::new().unwrap();
@@ -543,7 +576,7 @@ mod tests {
         properties.set_size("1.22 GB".into());
         properties.set_kind(FileKind::Video);
         properties.set_editable(true);
-        snapshot::save(&window, &properties, 560, 260, &dir.join("properties.png"));
+        shots.take(&properties, 560, 260, "properties");
         properties.hide().unwrap();
 
         let options = OptionsWindow::new().unwrap();
@@ -558,7 +591,7 @@ mod tests {
                 connections: 16,
             },
         ])));
-        snapshot::save(&window, &options, 640, 480, &dir.join("options-dark.png"));
+        shots.take(&options, 640, 480, "options-dark");
         options.hide().unwrap();
 
         let batch = BatchWindow::new().unwrap();
@@ -577,14 +610,14 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
         )));
-        snapshot::save(&window, &batch, 560, 460, &dir.join("batch.png"));
+        shots.take(&batch, 560, 460, "batch");
         batch.hide().unwrap();
 
         let category = CategoryWindow::new().unwrap();
         category.set_name("Images".into());
         category.set_extensions("png jpg webp".into());
         category.set_default_folder("/Users/me/Downloads".into());
-        snapshot::save(&window, &category, 480, 180, &dir.join("category.png"));
+        shots.take(&category, 480, 180, "category");
         category.hide().unwrap();
 
         let scheduler = SchedulerWindow::new().unwrap();
@@ -602,7 +635,8 @@ mod tests {
         ])));
         scheduler.set_stop_enabled(true);
         scheduler.set_stop_hour(6);
-        snapshot::save(&window, &scheduler, 760, 460, &dir.join("scheduler.png"));
+        shots.take(&scheduler, 760, 460, "scheduler");
+        shots.finish();
     }
 
     /// Six segments of a `total`-byte file in different states, as the planner would leave them.

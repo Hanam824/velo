@@ -1,6 +1,6 @@
 //! Probing and single-connection downloads against the local test server.
 
-mod support;
+use velo_engine::testing as support;
 
 use std::fs;
 

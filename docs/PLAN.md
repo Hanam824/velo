@@ -343,6 +343,10 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
 - "Open with…" in Download complete and the context menu: each OS has its own app chooser and no common way to call it.
 - Joining WebM video and Opus sound (VP9/AV1 in WebM): `velo-mux` joins fragmented MP4 only, so the format picker offers MP4 video with M4A sound; an `ffmpeg` on `PATH` is used if the MP4 joiner can't handle a pair.
 - Reserving disk space for a download up front (`fallocate`, `F_PREALLOCATE`, `SetFileValidData`): the data file is sparse, so a full disk shows up as a failed write part way. It would also stop NTFS from fragmenting a file that many connections write at once, which slows reading it back from a hard drive.
+- A test of `Bridge`'s probe (`crates/velo-gui/src/bridge.rs`): it hands its result back through the event loop, which the headless test backend doesn't have, so the flow tests ask servers through a prober of their own and that hand-back has no test.
+- Flow tests for context menus (Add to Queue, Open, Properties): the headless test backend can't open them, so the queue flow calls the entry's callback instead of clicking it.
+- Making the reference-picture step in `ci.yml` blocking: it runs with `continue-on-error` until a run on the Windows runner has matched the references. If the runner draws text differently, take the references from the step's artifact, or bundle a font.
+- Reference pictures that match on every OS: text is drawn with the system's fonts, so the references are made and compared on Windows only. A font bundled for the snapshot test would let Linux and macOS compare too.
 - Measuring the data file's sync interval (`SYNC_INTERVAL`, 1 s) on a hard drive: with many connections writing at scattered offsets each sync costs seeks, and 5 s would only risk 5 s of download after a power cut. Change it only with numbers.
 - FAT32 and exFAT have no sparse files, so setting the data file's length may write zeros for all of it before the first byte arrives; grow the file as it fills there instead.
 - Record in the stored download that it claimed its name (a schema migration), so a resume never continues into a `.velo-tmp` it didn't create (downloads saved before the single-file engine never claimed one, or a `.velo-tmp` the user deleted by hand and another download then claimed).
@@ -365,6 +369,8 @@ Each day ends with a green CI run and a working build. Plan for about 1 develope
   - Manual check: download a large public test file (e.g. a Linux ISO) with 1 vs 8 vs 16 connections and compare throughput.
 - **UI:**
   - `i-slint-backend-testing` headless tests for the dialogs (button enable/disable logic, model updates).
+  - Flow tests (`crates/velo-gui/src/flows.rs`): the real windows, clicked and typed into by what assistive technology calls each control, with the real engine and a local test server. They cover adding a download, stop/resume/delete, Options, and queues with the Scheduler.
+  - Reference pictures (`crates/velo-gui/snapshots/`): the snapshot test draws every window and, with `VELO_SNAPSHOT_COMPARE=1`, compares it with its reference (CI does on Windows).
   - `cargo run -p velo-gui` manual walkthrough against the research inventory checklist.
 - **Release:** a nightly workflow produces installers; install each on a VM/runner and launch it (smoke step in CI that runs `velo-cli --version`).
 - **Phase 2:**

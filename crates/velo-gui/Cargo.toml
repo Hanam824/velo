@@ -26,6 +26,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 tracing.workspace = true
 
 [dev-dependencies]
+# The engine's local test server, which the flow tests download from.
+velo-engine = { workspace = true, features = ["testing"] }
 # Must match the slint version: runs the UI without a window system.
 i-slint-backend-testing = "=1.18.1"
 # For the snapshot test: the software renderer with system fonts draws windows into PNG files.

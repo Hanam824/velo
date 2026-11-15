@@ -1,0 +1,465 @@
+//! A local HTTP server for tests, so they never touch the internet: the engine's own, and the
+//! app's flow tests. Only built with the `testing` feature.
+//!
+//! Routes (every file body is [`body`] cut to the given size):
+//! - `/files/{name}`: answers `HEAD` and ranges, with `Accept-Ranges`, `ETag` and `Last-Modified`.
+//! - `/norange/{name}`: ignores `Range` and always sends the whole file with `200`.
+//! - `/nohead/{name}`: rejects `HEAD` with `405` and leaves out `Accept-Ranges`, but answers ranges.
+//! - `/attachment`: like `/files`, with a UTF-8 `Content-Disposition` file name.
+//! - `/empty.txt`: an empty file.
+//! - `/redirect`: redirects to `/files/redirected.bin`.
+//! - `/slow/{name}`: like `/files`, sent in 8 KiB chunks 2 ms apart, so connections overlap.
+//! - `/flaky/{name}`: like `/slow`, but every other `GET` stops halfway through its range.
+//! - `/stall/{name}`: like `/slow`, but every other `GET` goes silent halfway through its range
+//!   without closing the connection.
+//! - `/fail/{name}`: answers `HEAD` like `/files`, but every `GET` with `503`.
+//! - `/slower/{name}`: like `/slow`, in 2 KiB chunks 10 ms apart: a file takes several of the
+//!   engine's 250 ms progress intervals, so a test can pause or delete it mid-way.
+//! - `/versioned/{name}`: like `/slower`, with [`versioned_body`] and `ETag` `"v<n>"` for the
+//!   current version `n`, which starts at 0.
+//! - `/bump`: moves `/versioned` to the next version.
+//! - `/choppy/{name}`: like `/slow`, but every `GET` stops after 64 KiB of its range.
+//! - `/flakyslow/{name}`: like `/flaky`, at the `/slower` pace, so it can be paused.
+//! - `/big/{name}`: [`big_body`] with ranges, sent at 16 KiB every 5 ms per connection (about
+//!   3 MB/s each), for the benchmark.
+//! - `/auth/{name}`: like `/files`, but only with Basic authorization for [`USER`] and
+//!   [`PASSWORD`]; `401` otherwise.
+//! - `/headers/{name}`: like `/files`, but only with `Referer` [`REFERER`] and `Cookie`
+//!   [`COOKIES`]; `403` otherwise.
+//! - `/capped/{name}`: like `/files`, but answers `403` to a range longer than [`CAP`] bytes,
+//!   as YouTube does.
+//! - `/blob/{name}`: like `/files`, with the bytes given to [`put_blob`] for `name`.
+//! - anything else: `404`.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::{Body, Bytes};
+use axum::http::header::{
+    ACCEPT_RANGES, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, COOKIE, ETAG,
+    LAST_MODIFIED, LOCATION, RANGE, REFERER as REFERER_HEADER,
+};
+use axum::http::{HeaderMap, Method, Response, StatusCode};
+use axum::routing::get;
+
+/// Size of the files the server sends.
+pub const SIZE: usize = 300_000;
+
+/// User name `/auth` accepts.
+pub const USER: &str = "velo";
+
+/// Password `/auth` accepts.
+pub const PASSWORD: &str = "s3cret pass";
+
+/// `Referer` that `/headers` needs.
+pub const REFERER: &str = "https://example.test/page";
+
+/// `Cookie` that `/headers` needs.
+pub const COOKIES: &str = "session=abc; theme=dark";
+
+/// `ETag` of the files under `/files`.
+pub const ETAG_VALUE: &str = "\"v1\"";
+
+/// `Last-Modified` of the files under `/files`.
+pub const LAST_MODIFIED_VALUE: &str = "Mon, 26 Oct 2026 00:00:00 GMT";
+
+/// The bytes of every file: a fixed pattern that isn't periodic over short distances, so a
+/// misplaced range shows up as a mismatch.
+pub fn body() -> Vec<u8> {
+    (0..SIZE as u64)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect()
+}
+
+/// The files `/blob` serves, by name.
+static BLOBS: LazyLock<Mutex<HashMap<String, Vec<u8>>>> = LazyLock::new(Mutex::default);
+
+/// Makes `/blob/{name}` serve `bytes`, on every test server of this process.
+pub fn put_blob(name: &str, bytes: Vec<u8>) {
+    BLOBS.lock().unwrap().insert(name.to_string(), bytes);
+}
+
+/// The longest range `/capped` serves.
+pub const CAP: u64 = 64 * 1024;
+
+/// Size of `/big`.
+pub const BIG_SIZE: usize = 8 * 1024 * 1024;
+
+/// The bytes of `/big`: the [`body`] pattern over [`BIG_SIZE`] bytes, built once.
+pub fn big_body() -> &'static [u8] {
+    static BODY: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| {
+        (0..BIG_SIZE as u64)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect()
+    })
+}
+
+/// The bytes of version `n` of `/versioned`: [`body`] with every byte XORed with `n`.
+pub fn versioned_body(n: u8) -> Vec<u8> {
+    body().into_iter().map(|b| b ^ n).collect()
+}
+
+/// How fast [`trickle`] sends: chunk size and the pause before each chunk.
+#[derive(Clone, Copy)]
+struct Pace(usize, Duration);
+
+/// 8 KiB every 2 ms.
+const SLOW: Pace = Pace(8 * 1024, Duration::from_millis(2));
+
+/// 2 KiB every 10 ms.
+const SLOWER: Pace = Pace(2 * 1024, Duration::from_millis(10));
+
+/// 16 KiB every 5 ms.
+const THROTTLED: Pace = Pace(16 * 1024, Duration::from_millis(5));
+
+/// Where [`trickle`] cuts the connection.
+#[derive(Clone, Copy)]
+enum Cut {
+    /// Sends everything.
+    Never,
+    /// Fails halfway through.
+    Half,
+    /// Sends half, then nothing more, and keeps the connection open.
+    Stall,
+    /// Fails after this many bytes.
+    After(usize),
+}
+
+/// Starts the server on a free local port and returns its base URL, e.g. `http://127.0.0.1:1234`.
+pub async fn start() -> String {
+    let gets = Arc::new(AtomicUsize::new(0));
+    let slow_gets = Arc::new(AtomicUsize::new(0));
+    let stall_gets = Arc::new(AtomicUsize::new(0));
+    let version = Arc::new(AtomicUsize::new(0));
+    let bump = Arc::clone(&version);
+    let app = Router::new()
+        .route(
+            "/blob/{name}",
+            get(
+                |axum::extract::Path(name): axum::extract::Path<String>,
+                 method: Method,
+                 headers: HeaderMap| async move {
+                    let bytes = BLOBS.lock().unwrap().get(&name).cloned();
+                    match bytes {
+                        Some(bytes) => serve(&method, &headers, &bytes, true, &[]),
+                        None => status(StatusCode::NOT_FOUND),
+                    }
+                },
+            ),
+        )
+        .route(
+            "/capped/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                let asked = headers
+                    .get(RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("bytes="))
+                    .and_then(|v| v.split_once('-'))
+                    .map(|(from, to)| {
+                        let from: u64 = from.parse().unwrap_or(0);
+                        let to: u64 = to.parse().unwrap_or(SIZE as u64 - 1);
+                        to + 1 - from
+                    });
+                if asked.is_some_and(|len| len > CAP) {
+                    return status(StatusCode::FORBIDDEN);
+                }
+                serve(&method, &headers, &body(), true, &[])
+            }),
+        )
+        .route(
+            "/files/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                serve(&method, &headers, &body(), true, &[])
+            }),
+        )
+        .route(
+            "/norange/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                serve(&method, &headers, &body(), false, &[])
+            }),
+        )
+        .route(
+            "/nohead/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                if method == Method::HEAD {
+                    return status(StatusCode::METHOD_NOT_ALLOWED);
+                }
+                let mut response = serve(&method, &headers, &body(), true, &[]);
+                response.headers_mut().remove(ACCEPT_RANGES);
+                response
+            }),
+        )
+        .route(
+            "/attachment",
+            get(|method: Method, headers: HeaderMap| async move {
+                let disposition =
+                    "attachment; filename=\"resume.pdf\"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf";
+                serve(
+                    &method,
+                    &headers,
+                    &body(),
+                    true,
+                    &[(CONTENT_DISPOSITION, disposition)],
+                )
+            }),
+        )
+        .route(
+            "/empty.txt",
+            get(|method: Method, headers: HeaderMap| async move {
+                serve(&method, &headers, &[], true, &[])
+            }),
+        )
+        .route(
+            "/redirect",
+            get(|| async {
+                Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header(LOCATION, "/files/redirected.bin")
+                    .body(Body::empty())
+                    .unwrap()
+            }),
+        )
+        .route(
+            "/slow/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                trickle(
+                    serve(&method, &headers, &body(), true, &[]),
+                    Cut::Never,
+                    SLOW,
+                )
+                .await
+            }),
+        )
+        .route(
+            "/flaky/{name}",
+            get(move |method: Method, headers: HeaderMap| {
+                let gets = Arc::clone(&gets);
+                async move {
+                    let response = serve(&method, &headers, &body(), true, &[]);
+                    let cut = method == Method::GET
+                        && gets.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
+                    trickle(response, if cut { Cut::Half } else { Cut::Never }, SLOW).await
+                }
+            }),
+        )
+        .route(
+            "/stall/{name}",
+            get(move |method: Method, headers: HeaderMap| {
+                let gets = Arc::clone(&stall_gets);
+                async move {
+                    let response = serve(&method, &headers, &body(), true, &[]);
+                    let stall = method == Method::GET
+                        && gets.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
+                    trickle(response, if stall { Cut::Stall } else { Cut::Never }, SLOW).await
+                }
+            }),
+        )
+        .route(
+            "/slower/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                trickle(
+                    serve(&method, &headers, &body(), true, &[]),
+                    Cut::Never,
+                    SLOWER,
+                )
+                .await
+            }),
+        )
+        .route(
+            "/versioned/{name}",
+            get(move |method: Method, headers: HeaderMap| {
+                let n = version.load(Ordering::Relaxed) as u8;
+                async move {
+                    let mut response = serve(&method, &headers, &versioned_body(n), true, &[]);
+                    let etag = format!("\"v{n}\"").parse().unwrap();
+                    response.headers_mut().insert(ETAG, etag);
+                    trickle(response, Cut::Never, SLOWER).await
+                }
+            }),
+        )
+        .route(
+            "/bump",
+            get(move || async move {
+                bump.fetch_add(1, Ordering::Relaxed);
+                status(StatusCode::NO_CONTENT)
+            }),
+        )
+        .route(
+            "/auth/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                // "velo:s3cret pass" in base64.
+                let expected = "Basic dmVsbzpzM2NyZXQgcGFzcw==";
+                if headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) != Some(expected) {
+                    return status(StatusCode::UNAUTHORIZED);
+                }
+                serve(&method, &headers, &body(), true, &[])
+            }),
+        )
+        .route(
+            "/headers/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                let header = |name| {
+                    headers
+                        .get(name)
+                        .and_then(|v: &axum::http::HeaderValue| v.to_str().ok())
+                };
+                if header(REFERER_HEADER) != Some(REFERER) || header(COOKIE) != Some(COOKIES) {
+                    return status(StatusCode::FORBIDDEN);
+                }
+                serve(&method, &headers, &body(), true, &[])
+            }),
+        )
+        .route(
+            "/choppy/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                let response = serve(&method, &headers, &body(), true, &[]);
+                let cut = if method == Method::GET {
+                    Cut::After(64 * 1024)
+                } else {
+                    Cut::Never
+                };
+                trickle(response, cut, SLOW).await
+            }),
+        )
+        .route(
+            "/flakyslow/{name}",
+            get(move |method: Method, headers: HeaderMap| {
+                let gets = Arc::clone(&slow_gets);
+                async move {
+                    let response = serve(&method, &headers, &body(), true, &[]);
+                    let cut = method == Method::GET
+                        && gets.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
+                    trickle(response, if cut { Cut::Half } else { Cut::Never }, SLOWER).await
+                }
+            }),
+        )
+        .route(
+            "/big/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                trickle(
+                    serve(&method, &headers, big_body(), true, &[]),
+                    Cut::Never,
+                    THROTTLED,
+                )
+                .await
+            }),
+        )
+        .route(
+            "/fail/{name}",
+            get(|method: Method, headers: HeaderMap| async move {
+                if method == Method::GET {
+                    return status(StatusCode::SERVICE_UNAVAILABLE);
+                }
+                serve(&method, &headers, &body(), true, &[])
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{address}")
+}
+
+/// Re-sends `response`'s body at `pace`, failing the connection where `cut` says.
+async fn trickle(response: Response<Body>, cut: Cut, pace: Pace) -> Response<Body> {
+    let Pace(chunk, delay) = pace;
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let stop = match cut {
+        Cut::Never => bytes.len(),
+        Cut::Half | Cut::Stall => bytes.len() / 2,
+        Cut::After(n) => bytes.len().min(n),
+    };
+    let stall = matches!(cut, Cut::Stall);
+    let cut = stop < bytes.len();
+    let chunks = futures_util::stream::unfold(0, move |sent| {
+        let bytes = bytes.clone();
+        async move {
+            if sent >= stop {
+                if stall && cut {
+                    std::future::pending::<()>().await;
+                }
+                // After the error the stream ends; `usize::MAX` marks that.
+                return (cut && sent != usize::MAX).then(|| {
+                    let error = std::io::Error::other("connection cut by the test server");
+                    (Err(error), usize::MAX)
+                });
+            }
+            tokio::time::sleep(delay).await;
+            let next = (sent + chunk).min(stop);
+            Some((Ok::<Bytes, std::io::Error>(bytes.slice(sent..next)), next))
+        }
+    });
+    Response::from_parts(parts, Body::from_stream(chunks))
+}
+
+/// An empty response with `code`.
+fn status(code: StatusCode) -> Response<Body> {
+    Response::builder()
+        .status(code)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Sends `data`, or the part of it that a `Range: bytes=<first>-[<last>]` header asks for when
+/// `ranges` is set.
+fn serve(
+    method: &Method,
+    headers: &HeaderMap,
+    data: &[u8],
+    ranges: bool,
+    extra: &[(axum::http::HeaderName, &str)],
+) -> Response<Body> {
+    let len = data.len() as u64;
+    let mut builder = Response::builder();
+    if ranges {
+        builder = builder
+            .header(ACCEPT_RANGES, "bytes")
+            .header(ETAG, ETAG_VALUE)
+            .header(LAST_MODIFIED, LAST_MODIFIED_VALUE);
+    }
+    for (name, value) in extra {
+        builder = builder.header(name, *value);
+    }
+
+    let range = headers
+        .get(RANGE)
+        .filter(|_| ranges)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes="))
+        .and_then(|v| v.split_once('-'))
+        .and_then(|(first, last)| {
+            let first: u64 = first.parse().ok()?;
+            let last: u64 = if last.is_empty() {
+                len.checked_sub(1)?
+            } else {
+                last.parse().ok()?
+            };
+            Some((first, last.min(len.saturating_sub(1))))
+        });
+    let (code, first, last) = match (headers.get(RANGE).filter(|_| ranges), range) {
+        (None, _) => (StatusCode::OK, 0, len),
+        (Some(_), Some((first, last))) if first <= last && first < len => {
+            builder = builder.header(CONTENT_RANGE, format!("bytes {first}-{last}/{len}"));
+            (StatusCode::PARTIAL_CONTENT, first, last + 1)
+        }
+        (Some(_), _) => {
+            return builder
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(CONTENT_RANGE, format!("bytes */{len}"))
+                .body(Body::empty())
+                .unwrap();
+        }
+    };
+    let slice = data[first as usize..last as usize].to_vec();
+    builder = builder.status(code).header(CONTENT_LENGTH, slice.len());
+    let body = if *method == Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(slice)
+    };
+    builder.body(body).unwrap()
+}

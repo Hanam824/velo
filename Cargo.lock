@@ -6320,6 +6320,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "velo-core",
+ "velo-engine",
  "velo-log",
  "velo-mux",
  "velo-platform",

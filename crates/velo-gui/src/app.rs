@@ -313,6 +313,12 @@ impl App {
         self.progress.window(id)
     }
 
+    /// The Scheduler window, if open.
+    #[cfg(test)]
+    pub fn scheduler_window(&self) -> Option<crate::SchedulerWindow> {
+        self.scheduler.window()
+    }
+
     /// The queue the toolbar's Start Queue and Stop Queue act on: the one selected in the tree,
     /// else the main queue.
     fn target_queue(&self) -> QueueId {

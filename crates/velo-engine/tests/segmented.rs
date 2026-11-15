@@ -1,6 +1,6 @@
 //! Multi-connection downloads, retries and resuming against the local test server.
 
-mod support;
+use velo_engine::testing as support;
 
 use std::fs;
 use std::path::Path;

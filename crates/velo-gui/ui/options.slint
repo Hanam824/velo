@@ -197,6 +197,7 @@ export component OptionsWindow inherits Window {
                     Labelled {
                         label: "Connections per download:";
                         ComboBox {
+                            accessible-label: "Connections per download";
                             model: root.connection-choices;
                             current-index <=> root.connections-index;
                         }
@@ -209,6 +210,7 @@ export component OptionsWindow inherits Window {
                             checked <=> root.limit-enabled;
                         }
                         SpinBox {
+                            accessible-label: "Speed limit in KB/sec";
                             width: 120px;
                             minimum: 1;
                             maximum: 1000000;

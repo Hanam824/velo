@@ -1,6 +1,6 @@
 //! The engine task: adding, pausing, resuming across a restart and deleting downloads.
 
-mod support;
+use velo_engine::testing as support;
 
 use std::fs;
 use std::path::{Path, PathBuf};

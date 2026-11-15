@@ -1,7 +1,7 @@
 //! End-to-end downloads under hostile conditions, checked by SHA-256, and a benchmark of how
 //! connections scale.
 
-mod support;
+use velo_engine::testing as support;
 
 use std::fs;
 use std::path::Path;

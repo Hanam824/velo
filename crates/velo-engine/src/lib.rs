@@ -16,6 +16,8 @@ pub mod planner;
 mod probe;
 pub mod scheduler;
 mod segmented;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use download::download_file;
 pub use engine::{DownloadEdit, Engine, EngineConfig, NewDownload, RetryPolicy};
