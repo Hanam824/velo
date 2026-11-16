@@ -1,6 +1,7 @@
 //! Downloads a URL from start to finish: probe, fetch, finish.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use reqwest::Client;
 use tokio::fs;
@@ -116,9 +117,11 @@ pub(crate) async fn run(
     let save_path = claim_save_path(download).await?;
     let joining = temp_path(&save_path);
     let (video, audio, out) = (files[0].clone(), files[1].clone(), joining.clone());
+    let started = Instant::now();
     let joined = tokio::task::spawn_blocking(move || velo_mux::mux(&video, &audio, &out))
         .await
         .map_err(|e| Error::Join(e.to_string()))?;
+    tracing::info!(id = download.id.0, elapsed = ?started.elapsed(), ok = joined.is_ok(), "streams joined");
     if let Err(error) = joined {
         let _ = fs::remove_file(&joining).await;
         return Err(Error::Join(error.to_string()));
@@ -138,7 +141,9 @@ async fn fetch(
     data: Option<&Path>,
     on_stage: &mut impl FnMut(Stage, &Download),
 ) -> Result<(Option<u64>, PathBuf)> {
+    let started = Instant::now();
     let probe = cancellable(context.cancel, probe(context.client, &download.url)).await?;
+    let probed = started.elapsed();
     let changed = download.total_size != probe.total_size
         || download.resumable != probe.resumable
         || download.etag != probe.etag
@@ -232,6 +237,14 @@ async fn fetch(
             })
         })
     };
+    tracing::info!(
+        id = download.id.0,
+        size = probe.total_size,
+        ?probed,
+        elapsed = ?started.elapsed(),
+        ok = result.is_ok(),
+        "fetch ended"
+    );
     // After a failure only bytes synced to disk may be saved for a resume.
     download.segments = match result {
         Ok(()) => context.progress.snapshot(),

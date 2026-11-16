@@ -1,7 +1,7 @@
 //! Asks a server about a URL before downloading: size, range support, file name and version.
 
 use reqwest::header::{
-    ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderMap,
+    ACCEPT_RANGES, CONNECTION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderMap,
     LAST_MODIFIED, RANGE,
 };
 use reqwest::{Client, StatusCode, Url};
@@ -33,7 +33,9 @@ pub struct Probe {
 /// answer means the server supports ranges; a `200` means it doesn't, and its body is dropped
 /// unread.
 pub async fn probe(client: &Client, url: &str) -> Result<Probe> {
-    let head = match client.head(url).send().await {
+    // `Connection: close`: some servers (YouTube's) leave the connection of a `HEAD` unusable,
+    // and the first range request that reused it failed and waited for a retry.
+    let head = match client.head(url).header(CONNECTION, "close").send().await {
         Ok(response) if response.status().is_success() => Some(response),
         _ => None,
     };

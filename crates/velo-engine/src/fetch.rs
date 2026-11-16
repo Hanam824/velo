@@ -39,9 +39,14 @@ pub async fn fetch_whole(
         .open(path)
         .await?;
     let mut response = cancellable(cancel, async {
-        Ok(client.get(url.clone()).send().await.inspect_err(|error| {
-            tracing::warn!(url = velo_log::redact::url(url.as_str()), %error, "request failed");
-        })?)
+        client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(Error::from)
+            .inspect_err(|error| {
+                tracing::warn!(url = velo_log::redact::url(url.as_str()), %error, "request failed");
+            })
     })
     .await?;
     if !response.status().is_success() {
@@ -99,17 +104,34 @@ pub(crate) async fn send_range(
         Some(end) => format!("bytes={position}-{}", end - 1),
         None => format!("bytes={position}-"),
     };
+    let sent = std::time::Instant::now();
     let response = client
         .get(url.clone())
         .header(RANGE, range.clone())
         .send()
         .await
+        .map_err(Error::from)
         .inspect_err(|error| {
-            tracing::warn!(url = velo_log::redact::url(url.as_str()), range, %error, "range request failed");
+            // The cause says what "error sending request" hides: a refused or reset connection,
+            // a timeout, a TLS failure.
+            let causes: Vec<String> =
+                std::iter::successors(std::error::Error::source(error), |e| e.source())
+                    .skip(1)
+                    .map(ToString::to_string)
+                    .collect();
+            tracing::warn!(
+                url = velo_log::redact::url(url.as_str()),
+                range,
+                %error,
+                cause = causes.join(": "),
+                after = ?sent.elapsed(),
+                "range request failed"
+            );
         })?;
     let status = response.status();
     if status.is_success() {
-        tracing::debug!(url = velo_log::redact::url(url.as_str()), range, %status, "range answered");
+        // `after` is the connection (a new one per request) plus the server's time to answer.
+        tracing::debug!(url = velo_log::redact::url(url.as_str()), range, %status, after = ?sent.elapsed(), "range answered");
     } else {
         tracing::warn!(
             url = velo_log::redact::url(url.as_str()),
