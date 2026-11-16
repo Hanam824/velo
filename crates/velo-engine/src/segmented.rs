@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::{Client, StatusCode, Url};
 use tokio::fs::{self, OpenOptions};
@@ -360,6 +360,7 @@ impl Worker {
                 return Err(error);
             }
             let delay = self.options.retry_delay * 2u32.saturating_pow(failures);
+            tracing::warn!(segment = id.0, %error, failures, ?delay, "retrying a segment");
             cancellable(&self.stop, async {
                 tokio::time::sleep(delay).await;
                 Ok(())
@@ -389,10 +390,20 @@ impl Worker {
                 Some(max) => end.min(position.saturating_add(max.max(1))),
                 None => end,
             };
-            match self
+            let sent = Instant::now();
+            let result = self
                 .fetch_request(id, &mut writer, &mut unflushed, position, request_end)
-                .await
-            {
+                .await;
+            tracing::debug!(
+                segment = id.0,
+                position,
+                asked = request_end - position,
+                received = self.progress.update(id, |s| s.position()) - position,
+                elapsed = ?sent.elapsed(),
+                ok = result.is_ok(),
+                "range request ended"
+            );
+            match result {
                 Ok(true) => return self.flush(id, &mut writer).await,
                 Ok(false) => {}
                 Err(error) => {

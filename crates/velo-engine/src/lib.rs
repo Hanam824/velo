@@ -30,12 +30,20 @@ pub use reqwest::Url;
 pub use segmented::{Options, Progress, download_segments};
 pub use tokio_util::sync::CancellationToken;
 
+impl From<reqwest::Error> for Error {
+    /// Wraps `error` without its address: a download address may carry a signature and the
+    /// user's IP, and the error's text ends up in the log and on screen.
+    fn from(error: reqwest::Error) -> Self {
+        Self::Http(error.without_url())
+    }
+}
+
 /// Errors from the download engine.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The HTTP request failed: bad URL, connection, TLS or protocol error.
     #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[source] reqwest::Error),
     /// Reading or writing a file failed.
     #[error("file error: {0}")]
     Io(#[from] std::io::Error),
