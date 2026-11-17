@@ -26,14 +26,15 @@ use velo_core::Settings;
 
 use crate::{Error, Limiter, Options, Progress, RequestOptions, Result, client_with};
 
-/// Whether `download` writes into `<save path>.velo-tmp` that it reserved: a plain download
-/// once it has segments. A video's streams are in its temp folder; it reserves its name only to
-/// join them, which runs to the end once started, so a `.velo-tmp` at its name may be another
-/// download's.
+/// Whether `download` writes into `<save path>.velo-tmp` that it reserved: any download once it
+/// has segments. A video's own stream goes there too; its sound stream's segments come after
+/// the video is in it.
+///
+/// ponytail: a video paused by a version that kept its streams in the temp folder never claimed
+/// its name, so this can take another download's `.velo-tmp` for its own; storing the claim
+/// (the plan's backlog) would tell them apart.
 fn has_claimed(download: &Download) -> bool {
-    let streams =
-        matches!(&download.source, Some(Source::YouTube { itags, .. }) if itags.len() >= 2);
-    !streams && !download.segments.is_empty()
+    !download.segments.is_empty()
 }
 
 /// Gives a settled `download` the file name `name`. A claimed unfinished file moves with it, so

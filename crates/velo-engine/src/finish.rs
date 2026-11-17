@@ -20,6 +20,23 @@ pub async fn finish(
     expected_size: Option<u64>,
     save_path: &Path,
 ) -> Result<()> {
+    if fs::try_exists(save_path).await? {
+        return Err(Error::Exists(save_path.to_path_buf()));
+    }
+    check_complete(data, segments, expected_size).await?;
+    fs::rename(data, save_path).await?;
+    Ok(())
+}
+
+/// Checks that the data file at `data` holds every byte of `segments` and syncs it to disk;
+/// returns its length.
+///
+/// Fails as [`finish`] does, except that nothing is renamed.
+pub(crate) async fn check_complete(
+    data: &Path,
+    segments: &[Segment],
+    expected_size: Option<u64>,
+) -> Result<u64> {
     let mut position = 0;
     for segment in segments {
         if segment.state != SegmentState::Done || segment.start != position {
@@ -30,21 +47,16 @@ pub async fn finish(
     if expected_size.is_some_and(|size| size != position) {
         return Err(Error::NotFinished);
     }
-    if fs::try_exists(save_path).await? {
-        return Err(Error::Exists(save_path.to_path_buf()));
-    }
     let file = OpenOptions::new().write(true).open(data).await?;
     file.sync_all().await?;
     let actual = file.metadata().await?.len();
-    drop(file);
     if actual != position {
         return Err(Error::SizeMismatch {
             expected: position,
             actual,
         });
     }
-    fs::rename(data, save_path).await?;
-    Ok(())
+    Ok(actual)
 }
 
 /// Path a download is written to until it is finished: `<save_path>.velo-tmp`.

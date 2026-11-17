@@ -811,12 +811,92 @@ async fn a_video_and_its_sound_are_downloaded_in_turn_and_joined() {
     assert_eq!(done.downloaded(), joined.len() as u64);
     assert_eq!(done.file_name, "clip.mp4");
     assert_eq!(done.total_size, Some(joined.len() as u64));
-    assert_eq!(&joined[4..8], b"ftyp");
-    let traks = joined.windows(4).filter(|w| w == b"trak").count();
-    let moofs = joined.windows(4).filter(|w| w == b"moof").count();
-    assert_eq!((traks, moofs), (2, 5), "both tracks and all five fragments");
+    // An unfragmented MP4: the video's stream as downloaded, the sound after it, the index last.
+    let top = top_level(&joined);
+    assert_eq!(&top[0].0, b"ftyp");
+    assert!(!top.iter().any(|(kind, _)| kind == b"moof"));
+    let (kind, moov) = top.last().unwrap();
+    assert_eq!(kind, b"moov");
+    assert_eq!(moov.windows(4).filter(|w| w == b"trak").count(), 2);
+    assert_eq!(
+        top.iter().filter(|(kind, _)| kind == b"mdat").count(),
+        2 + 3
+    );
     assert!(
         !root.path().join("temp").join(id.0.to_string()).exists(),
-        "the streams and their parts are cleaned up"
+        "the sound and the marker are cleaned up"
     );
+}
+
+/// The top-level boxes of `file`, as (type, box).
+fn top_level(file: &[u8]) -> Vec<([u8; 4], &[u8])> {
+    let mut boxes = Vec::new();
+    let mut at = 0;
+    while at < file.len() {
+        let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+        boxes.push((
+            file[at + 4..at + 8].try_into().unwrap(),
+            &file[at..at + size],
+        ));
+        at += size;
+    }
+    boxes
+}
+
+#[tokio::test]
+async fn a_video_downloaded_before_a_failure_is_not_downloaded_again() {
+    use velo_mux::testing::stream;
+    let base = support::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let times = [0, 180_000];
+    support::put_blob(
+        "kept-video.mp4",
+        stream(1, 1000, 90_000, b"vide", &times, 0x10),
+    );
+    support::put_blob(
+        "kept-audio.m4a",
+        stream(1, 44_100, 44_100, b"soun", &[0, 66_150], 0x80),
+    );
+    let config = |audio: &str| EngineConfig {
+        temp_dir: root.path().join("temp"),
+        settings: settings(),
+        retry: RetryPolicy {
+            max_retries: 0,
+            delay: Duration::from_millis(5),
+        },
+        resolver: Some(std::sync::Arc::new(ListResolver(vec![
+            format!("{base}/blob/kept-video.mp4"),
+            format!("{base}/blob/{audio}"),
+        ]))),
+    };
+    // The sound isn't there: the run fails after the video.
+    let first = Engine::start(config("missing.m4a"), Vec::new(), Vec::new()).unwrap();
+    let mut events = first.subscribe();
+    let id = first.add(NewDownload {
+        file_name: "clip.mp4".into(),
+        source: Some(Source::YouTube {
+            video_id: "dQw4w9WgXcQ".into(),
+            itags: vec![137, 140],
+        }),
+        ..new_download(root.path(), "https://expired.invalid/old".into(), true)
+    });
+    let failed = wait_for_state(&mut events, id, |s| matches!(s, DownloadState::Failed(_))).await;
+    assert!(velo_engine::temp_path(&failed.save_path()).is_file());
+    first.shutdown().await;
+
+    // A video fetched again now would hold other bytes.
+    support::put_blob(
+        "kept-video.mp4",
+        stream(1, 1000, 90_000, b"vide", &times, 0x20),
+    );
+    let second = Engine::start(config("kept-audio.m4a"), vec![failed], Vec::new()).unwrap();
+    let mut events = second.subscribe();
+    second.resume(id);
+    let done = wait_for_state(&mut events, id, |s| {
+        matches!(s, DownloadState::Complete | DownloadState::Failed(_))
+    })
+    .await;
+    let joined = fs::read(finished(&done)).unwrap();
+    assert!(joined.windows(3).any(|w| w == [0x10; 3]), "the first video");
+    assert!(!joined.windows(3).any(|w| w == [0x20; 3]));
 }

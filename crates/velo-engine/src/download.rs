@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use velo_core::{Download, DownloadId, Segment, SegmentId, SegmentState};
 
 use crate::fetch::cancellable;
+use crate::finish::check_complete;
 use crate::{
     Error, Options, Progress, Result, download_segments, fetch_whole, finish, planner, probe,
     temp_path, unique_file_name,
@@ -75,10 +76,13 @@ pub(crate) enum Stage {
 /// saved, or that file is gone, the download starts over, so bytes of two versions are never
 /// mixed.
 ///
-/// With two `streams` (the addresses of a video and its sound), each is downloaded into
-/// `<temp>/<id>/stream-<n>` in turn, its segments in `download` while it runs; a stream already
-/// finished is kept, so a resume picks up at the stream it stopped in. Then the two are joined
-/// into the save path. With fewer, `download.url` is downloaded as one file.
+/// With two `streams` (the addresses of a video and its sound), the video is downloaded first,
+/// straight into `<save path>.velo-tmp`, then the sound into `<temp>/<id>/stream-1`, each with
+/// its segments in `download` while it runs. A finished video is marked by
+/// `<temp>/<id>/video-done` (holding its length) and a finished sound by its file, so a resume
+/// picks up at the stream it stopped in. Then the sound is joined into the video's file in place
+/// ([`velo_mux::join`]), which moves to the save path. With fewer, `download.url` is downloaded
+/// as one file.
 pub(crate) async fn run(
     context: &RunContext<'_>,
     download: &mut Download,
@@ -96,47 +100,94 @@ pub(crate) async fn run(
         return Ok(save_path);
     }
 
-    let mut files = Vec::new();
-    for (index, url) in streams.iter().enumerate() {
-        let file = dir.join(format!("stream-{index}"));
-        if !fs::try_exists(&file).await? {
-            download.url.clone_from(url);
-            let data = temp_path(&file);
-            let (total, _) = fetch(context, download, Some(&data), &mut on_stage).await?;
-            finish(&data, &download.segments, total, &file).await?;
-            // The next stream starts with nothing of its own.
-            download.segments.clear();
-            download.total_size = None;
-            download.etag = None;
-            download.last_modified = None;
+    let video_len = match finished_video(download, &dir).await? {
+        Some(len) => len,
+        None => {
+            download.url.clone_from(&streams[0]);
+            let (total, data) = fetch(context, download, None, &mut on_stage).await?;
+            let len = check_complete(&data, &download.segments, total).await?;
+            fs::create_dir_all(&dir).await?;
+            fs::write(dir.join(VIDEO_DONE), len.to_string()).await?;
+            next_stream(download);
+            len
         }
-        files.push(file);
+    };
+    let audio = dir.join("stream-1");
+    if !fs::try_exists(&audio).await? {
+        download.url.clone_from(&streams[1]);
+        let data = temp_path(&audio);
+        let (total, _) = fetch(context, download, Some(&data), &mut on_stage).await?;
+        finish(&data, &download.segments, total, &audio).await?;
+        next_stream(download);
     }
+
     download.url.clone_from(&streams[0]);
     // While joining, show every byte of both streams as in, not the last stream's parts.
-    let mut size = 0;
-    for file in &files {
-        size += fs::metadata(file).await?.len();
-    }
-    set_whole(download, size);
+    set_whole(download, video_len + fs::metadata(&audio).await?.len());
     context.progress.replace(download.segments.clone());
     on_stage(Stage::Finishing, download);
-    let save_path = claim_save_path(download).await?;
-    let joining = temp_path(&save_path);
-    let (video, audio, out) = (files[0].clone(), files[1].clone(), joining.clone());
+    let save_path = download.save_path();
+    let data = temp_path(&save_path);
+    let (video, sound) = (data.clone(), audio.clone());
     let started = Instant::now();
-    let joined = tokio::task::spawn_blocking(move || velo_mux::mux(&video, &audio, &out))
+    let joined = tokio::task::spawn_blocking(move || velo_mux::join(&video, video_len, &sound))
         .await
         .map_err(|e| Error::Join(e.to_string()))?;
     tracing::info!(id = download.id.0, elapsed = ?started.elapsed(), ok = joined.is_ok(), "streams joined");
-    if let Err(error) = joined {
-        let _ = fs::remove_file(&joining).await;
-        return Err(Error::Join(error.to_string()));
+    // The video stays, so a retry joins again without downloading it.
+    joined.map_err(|error| Error::Join(error.to_string()))?;
+    if fs::try_exists(&save_path).await? {
+        return Err(Error::Exists(save_path));
     }
-    fs::rename(&joining, &save_path).await?;
+    fs::rename(&data, &save_path).await?;
     set_whole(download, fs::metadata(&save_path).await?.len());
     remove_dir(&dir).await?;
     Ok(save_path)
+}
+
+/// The file in a video's temp folder that says its video stream is all in its `.velo-tmp`, and
+/// holds the stream's length.
+const VIDEO_DONE: &str = "video-done";
+
+/// The length of `download`'s video stream if it is already downloaded, into the save path's
+/// `.velo-tmp`.
+///
+/// A finished video from an older version, kept in the temp folder (`<dir>/stream-0`), is moved
+/// to a claimed save path's `.velo-tmp` first, so it isn't downloaded again. A marker whose file
+/// is gone is removed, and the video starts over.
+async fn finished_video(download: &mut Download, dir: &Path) -> Result<Option<u64>> {
+    let marker = dir.join(VIDEO_DONE);
+    if let Ok(text) = fs::read_to_string(&marker).await {
+        let data = temp_path(&download.save_path());
+        match text.trim().parse() {
+            Ok(len) if fs::try_exists(&data).await? => return Ok(Some(len)),
+            _ => {
+                remove_file(&marker).await?;
+                download.segments.clear();
+                return Ok(None);
+            }
+        }
+    }
+    let old = dir.join("stream-0");
+    if !fs::try_exists(&old).await? {
+        return Ok(None);
+    }
+    let save_path = claim_save_path(download).await?;
+    // Replaces the empty file the claim made, on every OS.
+    fs::rename(&old, temp_path(&save_path)).await?;
+    let len = fs::metadata(temp_path(&save_path)).await?.len();
+    fs::write(&marker, len.to_string()).await?;
+    next_stream(download);
+    Ok(Some(len))
+}
+
+/// Clears what `download` knows of the stream it just finished, so the next one starts with
+/// nothing of its own.
+fn next_stream(download: &mut Download) {
+    download.segments.clear();
+    download.total_size = None;
+    download.etag = None;
+    download.last_modified = None;
 }
 
 /// Gives `download` a size of `size` bytes, all of them downloaded, as one finished segment.

@@ -1,23 +1,27 @@
-//! Joins a video-only and an audio-only MP4 stream into one MP4 file, without re-encoding.
+//! Joins a video-only and an audio-only fragmented MP4 stream into one MP4 file, in place and
+//! without re-encoding.
 //!
 //! YouTube serves high resolutions as separate DASH streams: fragmented MP4 files, each with
-//! one track, a `moov` that describes it and a run of `moof` + `mdat` fragments. [`mux`] writes
-//! one fragmented MP4 holding both tracks: the two `trak`s in one `moov` with track IDs 1 and
-//! 2, then the fragments of both interleaved by decode time. Sample data is copied as it is,
-//! and every box keeps its size, so the offsets inside each fragment stay valid.
+//! one track, a `moov` that describes it and a run of `moof` + `mdat` fragments. [`join`] turns
+//! the downloaded video stream itself into an ordinary (unfragmented) MP4 holding both tracks:
+//! the video's sample data stays where it was downloaded, the sound's `mdat`s are appended after
+//! it, and one new `moov` at the end gives both tracks' sample tables, built from the
+//! fragments' `trun`s. The video's own `moov`, `sidx` and `moof`s become `free` boxes. So a join
+//! writes the sound and a small index, however large the video, instead of copying the whole
+//! video into a new file.
 //!
-//! YouTube's streams also give the whole duration in their (empty) sample tables' headers,
-//! which some players add to the fragments' and so show twice the length. The joined file
-//! gives it once, in `mehd`, as fragmented MP4 files should.
+//! The new `moov` gives each track's length from its samples, once; YouTube's streams also give
+//! it in their (empty) sample tables' headers, which some players would add to the samples'.
 //!
 //! Inputs it can't join (not fragmented, more than one track, absolute data offsets) fail with
-//! [`Error::Unsupported`]; [`mux`] then tries an `ffmpeg` found on `PATH`.
+//! [`Error::Unsupported`] before anything is written; [`join`] then tries an `ffmpeg` found on
+//! `PATH`.
 
 mod boxes;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,177 +52,223 @@ pub enum Error {
 /// Result with [`Error`] as the default error type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Joins `video` and `audio` into `out`; if they can't be joined here and an `ffmpeg` is on
-/// `PATH`, it joins them instead.
-///
-/// `out` is overwritten. Blocks while it copies; run it off an async runtime's workers.
-pub fn mux(video: &Path, audio: &Path, out: &Path) -> Result<()> {
-    match mux_mp4(video, audio, out) {
-        Ok(()) => Ok(()),
-        Err(error) => match find_executable("ffmpeg") {
-            Some(ffmpeg) => mux_ffmpeg(&ffmpeg, video, audio, out),
-            None => Err(error),
-        },
-    }
-}
-
-/// Bytes read and written at a time while copying the fragments into the joined file.
+/// Bytes read and written at a time while appending the sound to the video.
 ///
 /// Measured on an NVMe drive with a 411 MB video: 0.53 s to copy with 8 KiB (the `BufWriter`
 /// default), 0.19 s with 1 MiB.
 const COPY_BUFFER: usize = 1 << 20;
 
-/// Joins fragmented MP4 `video` and `audio` into fragmented MP4 `out`.
+/// Most samples one `trun` may hold; more means a broken file, not a real fragment.
+const MAX_RUN: u32 = 10_000_000;
+
+/// Turns the video stream `video`, whose first `video_len` bytes are the downloaded stream, into
+/// an MP4 file with `audio`'s sound too; if that can't be done here and an `ffmpeg` is on `PATH`,
+/// it joins them into `video` instead.
 ///
-/// `out` is synced to disk before this returns. The time spent reading, copying and syncing is
-/// logged.
-pub fn mux_mp4(video: &Path, audio: &Path, out: &Path) -> Result<()> {
-    let started = Instant::now();
-    let mut video = Input::read(video)?;
-    let mut audio = Input::read(audio)?;
-    let read = started.elapsed();
-    let movie_timescale = video.movie_timescale;
-
-    let mut mvhd = video.mvhd.clone();
-    let wide = mvhd[8] == 1;
-    set_u32(&mut mvhd, 8 + if wide { 108 } else { 96 }, 3);
-    // The longer of the two, in the video's movie timescale.
-    let audio_duration = u128::from(audio.duration) * u128::from(movie_timescale)
-        / u128::from(audio.movie_timescale.max(1));
-    let duration = video.duration.max(audio_duration as u64);
-    set_duration(&mut mvhd, 8, if wide { 24 } else { 16 }, wide, 0);
-    let video_trak = track_with_id(&video.trak, 1)?;
-    let audio_trak = track_with_id(&audio.trak, 2)?;
-    let mut mvex_payload = make_box(
-        b"mehd",
-        &[&[1, 0, 0, 0], &duration.to_be_bytes()[..]].concat(),
-    );
-    for (trex, id) in [(&video.trex, 1), (&audio.trex, 2)] {
-        let mut trex = trex.clone();
-        set_u32(&mut trex, 12, id);
-        mvex_payload.extend_from_slice(&trex);
+/// See [`join_in_place`]. Blocks while it writes; run it off an async runtime's workers.
+pub fn join(video: &Path, video_len: u64, audio: &Path) -> Result<()> {
+    match join_in_place(video, video_len, audio) {
+        // Raised before anything was written: `video` is still the stream.
+        Err(error @ (Error::Unsupported(_) | Error::Malformed(_))) => {
+            let Some(ffmpeg) = find_executable("ffmpeg") else {
+                return Err(error);
+            };
+            tracing::info!(%error, "joining the streams with ffmpeg");
+            let mut out = video.as_os_str().to_owned();
+            out.push(".join");
+            let out = PathBuf::from(out);
+            let joined = mux_ffmpeg(&ffmpeg, video, audio, &out).and_then(|()| {
+                OpenOptions::new().write(true).open(&out)?.sync_all()?;
+                std::fs::rename(&out, video)?;
+                Ok(())
+            });
+            if joined.is_err() {
+                let _ = std::fs::remove_file(&out);
+            }
+            joined
+        }
+        result => result,
     }
-    let moov = make_box(
-        b"moov",
-        &[
-            mvhd,
-            video_trak,
-            audio_trak,
-            make_box(b"mvex", &mvex_payload),
-        ]
-        .concat(),
-    );
-    let ftyp = make_box(
-        b"ftyp",
-        &[
-            b"isom".as_slice(),
-            &0x200u32.to_be_bytes(),
-            b"isom",
-            b"iso2",
-            b"iso6",
-            b"mp41",
-        ]
-        .concat(),
-    );
+}
 
-    // Every fragment, as (input, index), in decode-time order; video first on a tie.
-    let mut order: Vec<(usize, usize)> = (0..video.fragments.len())
-        .map(|i| (0, i))
-        .chain((0..audio.fragments.len()).map(|i| (1, i)))
+/// Turns the fragmented video stream `video` into an unfragmented MP4 file that also holds the
+/// fragmented sound stream `audio`, writing only the sound and a new index.
+///
+/// `video` is first cut back to `video_len` bytes, the stream as downloaded, so a join that
+/// stopped part way can run again: the boxes it turned into `free` are still recognised by what
+/// they hold. Both inputs are read and checked before anything is written, so an error other
+/// than [`Error::Io`] leaves `video` as the stream it was. `video` is synced to disk before this
+/// returns, and the time spent reading, writing and syncing is logged.
+pub fn join_in_place(video: &Path, video_len: u64, audio: &Path) -> Result<()> {
+    let started = Instant::now();
+    let mut file = OpenOptions::new().read(true).write(true).open(video)?;
+    if file.metadata()?.len() < video_len {
+        return Err(Error::Malformed(
+            "the video is shorter than its download".into(),
+        ));
+    }
+    file.set_len(video_len)?;
+    let pictures = Stream::read(&mut file)?;
+    let mut sound_file = File::open(audio)?;
+    let sound = Stream::read(&mut sound_file)?;
+
+    // The sound's media boxes go after the video, in order.
+    let mut moved = Vec::with_capacity(sound.mdats.len());
+    let mut end = video_len;
+    for mdat in &sound.mdats {
+        moved.push(end);
+        end += mdat.len();
+    }
+    let picture_offsets: Vec<u64> = pictures.track.chunks.iter().map(|c| c.offset).collect();
+    let sound_offsets: Vec<u64> = sound
+        .track
+        .chunks
+        .iter()
+        .map(|c| moved[c.mdat] + (c.offset - sound.mdats[c.mdat].start))
         .collect();
-    let time = |input: &Input, i: usize| {
-        (
-            u128::from(input.fragments[i].time),
-            u128::from(input.media_timescale),
-        )
-    };
-    order.sort_by(|&(a_input, a), &(b_input, b)| {
-        let (a_time, a_scale) = time(if a_input == 0 { &video } else { &audio }, a);
-        let (b_time, b_scale) = time(if b_input == 0 { &video } else { &audio }, b);
-        (a_time * b_scale).cmp(&(b_time * a_scale))
-    });
+    let wide = picture_offsets
+        .iter()
+        .chain(&sound_offsets)
+        .any(|&offset| offset > u64::from(u32::MAX));
+    let timescale = pictures.movie_timescale;
+    let (picture_trak, picture_length) =
+        classic_trak(&pictures, 1, timescale, &picture_offsets, wide)?;
+    let (sound_trak, sound_length) = classic_trak(&sound, 2, timescale, &sound_offsets, wide)?;
+    let mut mvhd = pictures.mvhd.clone();
+    let root = boxes_in(&mvhd, 0, mvhd.len())?[0];
+    let at = root.payload() as usize;
+    let version_1 = mvhd[at] == 1;
+    set_u32(&mut mvhd, at + if version_1 { 108 } else { 96 }, 3);
+    set_length(
+        &mut mvhd,
+        at,
+        if version_1 { 24 } else { 16 },
+        picture_length.max(sound_length),
+    )?;
+    let moov = make_box(b"moov", &[mvhd, picture_trak, sound_trak].concat());
+    let read = started.elapsed();
 
-    let copying = Instant::now();
-    // `io::copy` reads straight into this buffer, so it sets the read size too.
-    let mut writer = BufWriter::with_capacity(COPY_BUFFER, File::create(out)?);
-    writer.write_all(&ftyp)?;
-    writer.write_all(&moov)?;
-    for (sequence, (input, index)) in order.into_iter().enumerate() {
-        let (source, track) = if input == 0 {
-            (&mut video, 1)
-        } else {
-            (&mut audio, 2)
-        };
-        let fragment = &source.fragments[index];
-        let mut moof = fragment.moof.clone();
-        let root = boxes_in(&moof, 0, moof.len())?[0];
-        let mfhd = child(&moof, &root, b"mfhd")?.ok_or_else(|| missing("mfhd"))?;
-        set_u32(&mut moof, mfhd.payload() as usize + 4, sequence as u32 + 1);
-        let tfhd = descendant(&moof, &root, &[b"traf", b"tfhd"])?.ok_or_else(|| missing("tfhd"))?;
-        set_u32(&mut moof, tfhd.payload() as usize + 4, track);
-        writer.write_all(&moof)?;
-        let mdat = fragment.mdat;
-        source.file.seek(SeekFrom::Start(mdat.start))?;
-        let copied = std::io::copy(&mut (&mut source.file).take(mdat.len()), &mut writer)?;
+    let writing = Instant::now();
+    if let Some(ftyp) = pictures.ftyp {
+        file.seek(SeekFrom::Start(ftyp.payload()))?;
+        file.write_all(b"isom")?;
+    }
+    for hidden in &pictures.hide {
+        file.seek(SeekFrom::Start(hidden.start + 4))?;
+        file.write_all(b"free")?;
+    }
+    file.seek(SeekFrom::Start(video_len))?;
+    let mut writer = BufWriter::with_capacity(COPY_BUFFER, &mut file);
+    for mdat in &sound.mdats {
+        sound_file.seek(SeekFrom::Start(mdat.start))?;
+        let copied = std::io::copy(&mut (&mut sound_file).take(mdat.len()), &mut writer)?;
         if copied != mdat.len() {
             return Err(Error::Malformed("a media box is cut off".into()));
         }
     }
-    let file = writer.into_inner().map_err(|e| e.into_error())?;
-    let copy = copying.elapsed();
+    writer.write_all(&moov)?;
+    writer.flush()?;
+    drop(writer);
+    let write = writing.elapsed();
     let syncing = Instant::now();
     file.sync_all()?;
     let sync = syncing.elapsed();
-    let bytes = file.metadata()?.len();
-    tracing::info!(bytes, ?read, ?copy, ?sync, "mp4 streams joined");
+    tracing::info!(
+        appended = end - video_len + moov.len() as u64,
+        ?read,
+        ?write,
+        ?sync,
+        "mp4 joined in place"
+    );
     Ok(())
 }
 
-/// One input stream.
-struct Input {
-    file: File,
+/// One input stream: its movie box and where its samples are.
+struct Stream {
     /// The `mvhd` box.
     mvhd: Vec<u8>,
     /// The only `trak` box.
     trak: Vec<u8>,
-    /// The `trex` box of the track.
-    trex: Vec<u8>,
     /// Ticks per second of the movie (`mvhd`).
     movie_timescale: u32,
-    /// The length in the movie timescale, from `mehd` or else `mvhd`.
-    duration: u64,
-    /// Ticks per second of the track's media (`mdhd`); fragment times are in it.
+    /// Ticks per second of the track's media (`mdhd`); sample durations are in it.
     media_timescale: u32,
-    fragments: Vec<Fragment>,
+    /// The samples, from the fragments.
+    track: Track,
+    /// The top-level `mdat` boxes, in order.
+    mdats: Vec<BoxRef>,
+    /// The `ftyp` box, if any.
+    ftyp: Option<BoxRef>,
+    /// The top-level boxes an unfragmented file can't have (`moov`, `sidx`, `moof`…), to become
+    /// `free`.
+    hide: Vec<BoxRef>,
 }
 
-/// A `moof` and the `mdat` after it.
-struct Fragment {
-    moof: Vec<u8>,
-    mdat: BoxRef,
-    /// The decode time of the fragment's first sample, from `tfdt`.
-    time: u64,
+/// The samples of a track, in decode order.
+#[derive(Default)]
+struct Track {
+    /// Duration of each sample, in the media timescale.
+    durations: Vec<u32>,
+    /// Size of each sample in bytes.
+    sizes: Vec<u32>,
+    /// Composition time offset of each sample.
+    offsets: Vec<i32>,
+    /// Whether each sample is a sync sample (a key frame).
+    sync: Vec<bool>,
+    /// The runs of samples stored together, one per `trun`.
+    chunks: Vec<Chunk>,
 }
 
-impl Input {
-    /// Reads the structure of the stream at `path`: its movie box and where its fragments are.
-    fn read(path: &Path) -> Result<Self> {
-        let mut file = File::open(path)?;
-        let top = top_level(&mut file)?;
+/// A run of samples stored back to back.
+struct Chunk {
+    /// The file offset of the first sample.
+    offset: u64,
+    /// How many samples.
+    samples: u32,
+    /// The sample description they use (1-based).
+    description: u32,
+    /// The index in [`Stream::mdats`] of the box that holds them.
+    mdat: usize,
+}
+
+/// A sample's flags: it isn't a sync sample.
+const NON_SYNC: u32 = 0x0001_0000;
+
+impl Stream {
+    /// Reads the structure of the stream in `file`.
+    fn read(file: &mut File) -> Result<Self> {
+        let top = top_level(file)?;
+        // What each box is; a `free` box that holds an `mvhd` or `mfhd` was a `moov` or `moof`
+        // until a join that stopped part way.
+        let mut kinds = Vec::with_capacity(top.len());
+        for b in &top {
+            let mut kind = b.kind;
+            if &kind == b"free" && b.len() >= b.header + 8 {
+                let mut head = [0u8; 8];
+                file.seek(SeekFrom::Start(b.payload()))?;
+                file.read_exact(&mut head)?;
+                match &head[4..8] {
+                    b"mvhd" => kind = *b"moov",
+                    b"mfhd" => kind = *b"moof",
+                    _ => {}
+                }
+            }
+            kinds.push(kind);
+        }
         let moov_ref = top
             .iter()
-            .find(|b| &b.kind == b"moov")
+            .zip(&kinds)
+            .find(|(_, kind)| *kind == b"moov")
+            .map(|(b, _)| *b)
             .ok_or_else(|| missing("moov"))?;
-        let moov = read_box(&mut file, moov_ref)?;
+        let moov = read_box(file, &moov_ref)?;
         let root = boxes_in(&moov, 0, moov.len())?[0];
         let parts = children(&moov, &root)?;
         let bytes = |b: &BoxRef| moov[b.start as usize..b.end as usize].to_vec();
-
         let mvhd = parts
             .iter()
             .find(|b| &b.kind == b"mvhd")
             .ok_or_else(|| missing("mvhd"))?;
-        let movie_timescale = timescale(&moov, mvhd);
         let traks: Vec<&BoxRef> = parts.iter().filter(|b| &b.kind == b"trak").collect();
         if traks.len() != 1 {
             return Err(Error::Unsupported(format!(
@@ -233,57 +283,418 @@ impl Input {
             .find(|b| &b.kind == b"mvex")
             .ok_or_else(|| Error::Unsupported("the stream isn't fragmented".into()))?;
         let trex = child(&moov, mvex, b"trex")?.ok_or_else(|| missing("trex"))?;
-        let duration = match child(&moov, mvex, b"mehd")? {
-            Some(mehd) => read_duration(&moov, mehd.payload() as usize, 4, 4),
-            None => read_duration(&moov, mvhd.payload() as usize, 16, 24),
+        let at = trex.payload() as usize;
+        if trex.end < trex.payload() + 24 {
+            return Err(Error::Malformed("trex is cut off".into()));
+        }
+        let defaults = Defaults {
+            description: u32_at(&moov, at + 8),
+            duration: u32_at(&moov, at + 12),
+            size: u32_at(&moov, at + 16),
+            flags: u32_at(&moov, at + 20),
         };
 
-        let mut fragments = Vec::new();
-        for (index, moof_ref) in top.iter().enumerate().filter(|(_, b)| &b.kind == b"moof") {
+        let mut mdats = Vec::new();
+        let mut track = Track::default();
+        let mut time = 0u64;
+        for (index, (b, kind)) in top.iter().zip(&kinds).enumerate() {
+            if kind == b"mdat" {
+                mdats.push(*b);
+            }
+            if kind != b"moof" {
+                continue;
+            }
             let mdat = top[index + 1..]
                 .iter()
-                .take_while(|b| &b.kind != b"moof")
-                .find(|b| &b.kind == b"mdat")
-                .copied()
+                .zip(&kinds[index + 1..])
+                .take_while(|(_, kind)| *kind != b"moof")
+                .find(|(_, kind)| *kind == b"mdat")
+                .map(|(b, _)| *b)
                 .ok_or_else(|| missing("mdat"))?;
-            let moof = read_box(&mut file, moof_ref)?;
-            let root = boxes_in(&moof, 0, moof.len())?[0];
-            let trafs: Vec<BoxRef> = children(&moof, &root)?
-                .into_iter()
-                .filter(|b| &b.kind == b"traf")
-                .collect();
-            if trafs.len() != 1 {
-                return Err(Error::Unsupported(format!(
-                    "{} track fragments in one fragment",
-                    trafs.len()
-                )));
-            }
-            let tfhd = child(&moof, &trafs[0], b"tfhd")?.ok_or_else(|| missing("tfhd"))?;
-            if u32_at(&moof, tfhd.payload() as usize) & 0x00_0001 != 0 {
-                return Err(Error::Unsupported(
-                    "fragments with absolute data offsets".into(),
-                ));
-            }
-            let tfdt = child(&moof, &trafs[0], b"tfdt")?.ok_or_else(|| missing("tfdt"))?;
-            let at = tfdt.payload() as usize;
-            let time = if moof[at] == 1 {
-                u64_at(&moof, at + 4)
-            } else {
-                u64::from(u32_at(&moof, at + 4))
-            };
-            fragments.push(Fragment { moof, mdat, time });
+            let moof = read_box(file, b)?;
+            read_fragment(
+                &moof,
+                b.start,
+                // The next one the loop pushes.
+                (mdat, mdats.len()),
+                &defaults,
+                &mut time,
+                &mut track,
+            )?;
         }
+        let hide = top
+            .iter()
+            .zip(&kinds)
+            .filter(|(b, kind)| !matches!(*kind, b"ftyp" | b"mdat") && &b.kind != b"free")
+            .map(|(b, _)| *b)
+            .collect();
+        let ftyp = top
+            .iter()
+            .find(|b| &b.kind == b"ftyp" && b.len() >= b.header + 4)
+            .copied();
         Ok(Self {
             mvhd: bytes(mvhd),
             trak: bytes(traks[0]),
-            trex: bytes(&trex),
-            movie_timescale,
-            duration,
+            movie_timescale: timescale(&moov, mvhd),
             media_timescale: timescale(&moov, &mdhd),
-            fragments,
-            file,
+            track,
+            mdats,
+            ftyp,
+            hide,
         })
     }
+}
+
+/// The values a fragment's samples take when it doesn't give its own.
+#[derive(Clone, Copy)]
+struct Defaults {
+    description: u32,
+    duration: u32,
+    size: u32,
+    flags: u32,
+}
+
+/// Adds the samples of the fragment `moof`, which starts at `start` in its file and whose data
+/// is in `mdat` (the stream's `mdat_index`th), to `track`; `time` is the decode time reached so
+/// far.
+///
+/// A gap before the fragment's decode time (`tfdt`) lengthens the track's last sample, so the
+/// samples stay on time.
+fn read_fragment(
+    moof: &[u8],
+    start: u64,
+    (mdat, mdat_index): (BoxRef, usize),
+    stream: &Defaults,
+    time: &mut u64,
+    track: &mut Track,
+) -> Result<()> {
+    let root = boxes_in(moof, 0, moof.len())?[0];
+    let trafs: Vec<BoxRef> = children(moof, &root)?
+        .into_iter()
+        .filter(|b| &b.kind == b"traf")
+        .collect();
+    if trafs.len() != 1 {
+        return Err(Error::Unsupported(format!(
+            "{} track fragments in one fragment",
+            trafs.len()
+        )));
+    }
+    let traf = trafs[0];
+    let tfhd = child(moof, &traf, b"tfhd")?.ok_or_else(|| missing("tfhd"))?;
+    let mut reader = Fields::new(moof, &tfhd);
+    let flags = reader.u32()? & 0x00ff_ffff;
+    if flags & 0x00_0001 != 0 {
+        return Err(Error::Unsupported(
+            "fragments with absolute data offsets".into(),
+        ));
+    }
+    reader.u32()?; // track ID
+    let mut defaults = *stream;
+    if flags & 0x00_0002 != 0 {
+        defaults.description = reader.u32()?;
+    }
+    if flags & 0x00_0008 != 0 {
+        defaults.duration = reader.u32()?;
+    }
+    if flags & 0x00_0010 != 0 {
+        defaults.size = reader.u32()?;
+    }
+    if flags & 0x00_0020 != 0 {
+        defaults.flags = reader.u32()?;
+    }
+    let tfdt = child(moof, &traf, b"tfdt")?.ok_or_else(|| missing("tfdt"))?;
+    let mut reader = Fields::new(moof, &tfdt);
+    let decode = if reader.u32()? >> 24 == 1 {
+        reader.u64()?
+    } else {
+        u64::from(reader.u32()?)
+    };
+    if decode > *time {
+        if let Some(last) = track.durations.last_mut() {
+            *last = last.saturating_add(u32::try_from(decode - *time).unwrap_or(u32::MAX));
+        }
+        // ponytail: a first fragment that starts late is shifted to 0 rather than given an
+        // empty edit; YouTube's streams start at 0.
+        *time = decode;
+    }
+
+    // Without its own offset, a run's data follows the previous run's, the first's the moof.
+    let mut next = start;
+    for trun in children(moof, &traf)?.iter().filter(|b| &b.kind == b"trun") {
+        let mut reader = Fields::new(moof, trun);
+        let run_flags = reader.u32()? & 0x00ff_ffff;
+        let count = reader.u32()?;
+        if count > MAX_RUN {
+            return Err(Error::Malformed(format!("{count} samples in one run")));
+        }
+        let first = if run_flags & 0x00_0001 != 0 {
+            let offset = i64::from(reader.u32()? as i32);
+            u64::try_from(start as i64 + offset)
+                .map_err(|_| Error::Malformed("a run starts before the file".into()))?
+        } else {
+            next
+        };
+        let first_flags = if run_flags & 0x00_0004 != 0 {
+            Some(reader.u32()?)
+        } else {
+            None
+        };
+        let mut bytes = 0u64;
+        for n in 0..count {
+            let duration = if run_flags & 0x00_0100 != 0 {
+                reader.u32()?
+            } else {
+                defaults.duration
+            };
+            let size = if run_flags & 0x00_0200 != 0 {
+                reader.u32()?
+            } else {
+                defaults.size
+            };
+            let sample_flags = if run_flags & 0x00_0400 != 0 {
+                reader.u32()?
+            } else {
+                first_flags.filter(|_| n == 0).unwrap_or(defaults.flags)
+            };
+            let offset = if run_flags & 0x00_0800 != 0 {
+                // Version 0 stores it unsigned, but no real offset reaches 2^31.
+                reader.u32()? as i32
+            } else {
+                0
+            };
+            track.durations.push(duration);
+            track.sizes.push(size);
+            track.offsets.push(offset);
+            track.sync.push(sample_flags & NON_SYNC == 0);
+            bytes += u64::from(size);
+            *time += u64::from(duration);
+        }
+        if count == 0 {
+            continue;
+        }
+        if first < mdat.payload() || first + bytes > mdat.end {
+            return Err(Error::Unsupported(
+                "samples outside their fragment's media box".into(),
+            ));
+        }
+        track.chunks.push(Chunk {
+            offset: first,
+            samples: count,
+            description: defaults.description,
+            mdat: mdat_index,
+        });
+        next = first + bytes;
+    }
+    Ok(())
+}
+
+/// Reads a full box's fields in order, failing on one past its end.
+struct Fields<'a> {
+    buf: &'a [u8],
+    at: usize,
+    end: usize,
+}
+
+impl<'a> Fields<'a> {
+    /// The fields of `of`, in `buf`, from its version and flags on.
+    fn new(buf: &'a [u8], of: &BoxRef) -> Self {
+        Self {
+            buf,
+            at: of.payload() as usize,
+            end: of.end as usize,
+        }
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        if self.at + 4 > self.end {
+            return Err(Error::Malformed("a box is shorter than its fields".into()));
+        }
+        self.at += 4;
+        Ok(u32_at(self.buf, self.at - 4))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        if self.at + 8 > self.end {
+            return Err(Error::Malformed("a box is shorter than its fields".into()));
+        }
+        self.at += 8;
+        Ok(u64_at(self.buf, self.at - 8))
+    }
+}
+
+/// `stream`'s `trak` as track `id` of an unfragmented file whose movie runs at
+/// `movie_timescale`, with sample tables for its samples at `offsets` (one per chunk; 64-bit if
+/// `wide`). Returns it and the track's length in the movie timescale.
+fn classic_trak(
+    stream: &Stream,
+    id: u32,
+    movie_timescale: u32,
+    offsets: &[u64],
+    wide: bool,
+) -> Result<(Vec<u8>, u64)> {
+    let media_length: u64 = stream.track.durations.iter().map(|&d| u64::from(d)).sum();
+    let scale = |ticks: u64| {
+        (u128::from(ticks) * u128::from(movie_timescale)
+            / u128::from(stream.media_timescale.max(1))) as u64
+    };
+    let movie_length = scale(media_length);
+    let mut trak = stream.trak.clone();
+    let root = boxes_in(&trak, 0, trak.len())?[0];
+    let tkhd = child(&trak, &root, b"tkhd")?.ok_or_else(|| missing("tkhd"))?;
+    let at = tkhd.payload() as usize;
+    let version_1 = trak[at] == 1;
+    set_u32(&mut trak, at + if version_1 { 20 } else { 12 }, id);
+    set_length(&mut trak, at, if version_1 { 28 } else { 20 }, movie_length)?;
+    let mdhd = descendant(&trak, &root, &[b"mdia", b"mdhd"])?.ok_or_else(|| missing("mdhd"))?;
+    let at = mdhd.payload() as usize;
+    let version_1 = trak[at] == 1;
+    set_length(&mut trak, at, if version_1 { 24 } else { 16 }, media_length)?;
+    if let Some(elst) = descendant(&trak, &root, &[b"edts", b"elst"])? {
+        let at = elst.payload() as usize;
+        let version_1 = trak[at] == 1;
+        // ponytail: only a single edit, YouTube's case, is fitted to the samples; longer lists
+        // keep their lengths.
+        if u32_at(&trak, at + 4) == 1 {
+            let media_time = if version_1 {
+                u64_at(&trak, at + 16) as i64
+            } else {
+                i64::from(u32_at(&trak, at + 12) as i32)
+            };
+            let shown = media_length.saturating_sub(media_time.max(0) as u64);
+            set_length(&mut trak, at, 8, scale(shown))?;
+        }
+    }
+    let tables = sample_tables(&stream.track, offsets, wide);
+    let stbl = |buf: &[u8], stbl: &BoxRef| -> Result<Vec<u8>> {
+        let mut payload = Vec::new();
+        for part in children(buf, stbl)? {
+            // The fragmented stream's empty tables, replaced below.
+            if !matches!(
+                &part.kind,
+                b"stts" | b"ctts" | b"stss" | b"stsc" | b"stsz" | b"stz2" | b"stco" | b"co64"
+            ) {
+                payload.extend_from_slice(&buf[part.start as usize..part.end as usize]);
+            }
+        }
+        payload.extend_from_slice(&tables);
+        Ok(make_box(b"stbl", &payload))
+    };
+    let trak = rebuild(&trak, &root, &[b"mdia", b"minf", b"stbl"], &stbl)?;
+    Ok((trak, movie_length))
+}
+
+/// Makes a new box from the box it is given, found in the buffer it is given.
+type Replace<'a> = &'a dyn Fn(&[u8], &BoxRef) -> Result<Vec<u8>>;
+
+/// `parent` with the box at `path` below it replaced by what `last` makes of it, and every box
+/// on the way given its new size.
+fn rebuild(buf: &[u8], parent: &BoxRef, path: &[&[u8; 4]], last: Replace) -> Result<Vec<u8>> {
+    let Some((first, rest)) = path.split_first() else {
+        return last(buf, parent);
+    };
+    let mut payload = Vec::new();
+    let mut found = false;
+    for part in children(buf, parent)? {
+        if !found && &part.kind == *first {
+            payload.extend(rebuild(buf, &part, rest, last)?);
+            found = true;
+        } else {
+            payload.extend_from_slice(&buf[part.start as usize..part.end as usize]);
+        }
+    }
+    if !found {
+        return Err(missing(&boxes::name(**first)));
+    }
+    Ok(make_box(&parent.kind, &payload))
+}
+
+/// The sample table boxes for `track` with its chunks at `offsets`: `stts`, `ctts` (if any
+/// sample has a composition offset), `stss` (if any sample isn't a sync sample), `stsc`, `stsz`
+/// and `stco`, or `co64` if `wide`.
+fn sample_tables(track: &Track, offsets: &[u64], wide: bool) -> Vec<u8> {
+    let full = |kind: &[u8; 4], version: u8, entries: u32, body: &[u8]| {
+        make_box(
+            kind,
+            &[&[version, 0, 0, 0][..], &entries.to_be_bytes(), body].concat(),
+        )
+    };
+    let runs = |values: &[u32]| {
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        for &value in values {
+            match out.last_mut() {
+                Some((count, last)) if *last == value => *count += 1,
+                _ => out.push((1, value)),
+            }
+        }
+        out
+    };
+    let pairs = |runs: &[(u32, u32)]| {
+        runs.iter()
+            .flat_map(|(a, b)| [a.to_be_bytes(), b.to_be_bytes()])
+            .flatten()
+            .collect::<Vec<u8>>()
+    };
+
+    let stts = runs(&track.durations);
+    let mut tables = full(b"stts", 0, stts.len() as u32, &pairs(&stts));
+    if track.offsets.iter().any(|&o| o != 0) {
+        let negative = track.offsets.iter().any(|&o| o < 0);
+        let as_bits: Vec<u32> = track.offsets.iter().map(|&o| o as u32).collect();
+        let ctts = runs(&as_bits);
+        tables.extend(full(
+            b"ctts",
+            u8::from(negative),
+            ctts.len() as u32,
+            &pairs(&ctts),
+        ));
+    }
+    if track.sync.iter().any(|&s| !s) {
+        let numbers: Vec<u8> = (1..)
+            .zip(&track.sync)
+            .filter(|(_, sync)| **sync)
+            .flat_map(|(n, _): (u32, _)| n.to_be_bytes())
+            .collect();
+        let count = track.sync.iter().filter(|&&s| s).count() as u32;
+        tables.extend(full(b"stss", 0, count, &numbers));
+    }
+    // One entry wherever the samples per chunk or their description change.
+    let mut stsc: Vec<[u32; 3]> = Vec::new();
+    for (number, chunk) in (1..).zip(&track.chunks) {
+        if stsc
+            .last()
+            .is_none_or(|last| (last[1], last[2]) != (chunk.samples, chunk.description))
+        {
+            stsc.push([number, chunk.samples, chunk.description]);
+        }
+    }
+    let stsc_body: Vec<u8> = stsc
+        .iter()
+        .flat_map(|entry| entry.map(u32::to_be_bytes))
+        .flatten()
+        .collect();
+    tables.extend(full(b"stsc", 0, stsc.len() as u32, &stsc_body));
+    let sizes: Vec<u8> = track.sizes.iter().flat_map(|s| s.to_be_bytes()).collect();
+    // stsz has a default size (0: each sample has its own) before its count.
+    tables.extend(make_box(
+        b"stsz",
+        &[
+            &[0u8; 8][..],
+            &(track.sizes.len() as u32).to_be_bytes(),
+            &sizes,
+        ]
+        .concat(),
+    ));
+    let chunk_offsets: Vec<u8> = if wide {
+        offsets.iter().flat_map(|o| o.to_be_bytes()).collect()
+    } else {
+        offsets
+            .iter()
+            .flat_map(|&o| (o as u32).to_be_bytes())
+            .collect()
+    };
+    let kind = if wide { b"co64" } else { b"stco" };
+    tables.extend(full(kind, 0, offsets.len() as u32, &chunk_offsets));
+    tables
 }
 
 /// The timescale of an `mvhd` or `mdhd` box, which share the layout up to it.
@@ -296,51 +707,17 @@ fn timescale(buf: &[u8], full_box: &BoxRef) -> u32 {
     }
 }
 
-/// `trak` with its track ID set to `id` and its durations set to 0: its samples are all in
-/// fragments, which give their own timing.
-fn track_with_id(trak: &[u8], id: u32) -> Result<Vec<u8>> {
-    let mut trak = trak.to_vec();
-    let root = boxes_in(&trak, 0, trak.len())?[0];
-    let tkhd = child(&trak, &root, b"tkhd")?.ok_or_else(|| missing("tkhd"))?;
-    let at = tkhd.payload() as usize;
-    let wide = trak[at] == 1;
-    set_u32(&mut trak, at + if wide { 20 } else { 12 }, id);
-    set_duration(&mut trak, at, if wide { 28 } else { 20 }, wide, 0);
-    if let Some(mdhd) = descendant(&trak, &root, &[b"mdia", b"mdhd"])? {
-        let at = mdhd.payload() as usize;
-        let wide = trak[at] == 1;
-        set_duration(&mut trak, at, if wide { 24 } else { 16 }, wide, 0);
-    }
-    if let Some(elst) = descendant(&trak, &root, &[b"edts", b"elst"])? {
-        let at = elst.payload() as usize;
-        let wide = trak[at] == 1;
-        let count = u32_at(&trak, at + 4) as usize;
-        for entry in 0..count {
-            let offset = 8 + entry * if wide { 20 } else { 12 };
-            set_duration(&mut trak, at, offset, wide, 0);
-        }
-    }
-    Ok(trak)
-}
-
-/// Sets the duration field `offset` bytes into the full box whose payload starts at `at`: 64
-/// bits if `wide`, else 32.
-fn set_duration(buf: &mut [u8], at: usize, offset: usize, wide: bool, value: u64) {
-    if wide {
+/// Sets the length field `offset` bytes into the full box whose payload starts at `at`: 64 bits
+/// for version 1, else 32, which a length past `u32::MAX` doesn't fit.
+fn set_length(buf: &mut [u8], at: usize, offset: usize, value: u64) -> Result<()> {
+    if buf[at] == 1 {
         set_u64(buf, at + offset, value);
     } else {
-        set_u32(buf, at + offset, value as u32);
+        let value = u32::try_from(value)
+            .map_err(|_| Error::Unsupported("a length too long for its box".into()))?;
+        set_u32(buf, at + offset, value);
     }
-}
-
-/// The duration field of the full box whose payload starts at `at`: at `narrow` bytes in
-/// (32 bits) for version 0, at `wide` bytes in (64 bits) for version 1.
-fn read_duration(buf: &[u8], at: usize, narrow: usize, wide: usize) -> u64 {
-    if buf[at] == 1 {
-        u64_at(buf, at + wide)
-    } else {
-        u64::from(u32_at(buf, at + narrow))
-    }
+    Ok(())
 }
 
 /// The error for a box the joiner needs but didn't find.
@@ -348,7 +725,7 @@ fn missing(kind: &str) -> Error {
     Error::Malformed(format!("no {kind} box"))
 }
 
-/// Joins the streams with `ffmpeg`, copying both without re-encoding.
+/// Joins the streams with `ffmpeg` into `out`, copying both without re-encoding.
 fn mux_ffmpeg(ffmpeg: &Path, video: &Path, audio: &Path, out: &Path) -> Result<()> {
     let output = Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
@@ -361,9 +738,9 @@ fn mux_ffmpeg(ffmpeg: &Path, video: &Path, audio: &Path, out: &Path) -> Result<(
     if output.status.success() {
         Ok(())
     } else {
-        Err(Error::Ffmpeg(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ))
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        tracing::warn!(%error, "ffmpeg couldn't join the streams");
+        Err(Error::Ffmpeg(error))
     }
 }
 
