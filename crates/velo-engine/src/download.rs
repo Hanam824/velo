@@ -113,6 +113,13 @@ pub(crate) async fn run(
         files.push(file);
     }
     download.url.clone_from(&streams[0]);
+    // While joining, show every byte of both streams as in, not the last stream's parts.
+    let mut size = 0;
+    for file in &files {
+        size += fs::metadata(file).await?.len();
+    }
+    set_whole(download, size);
+    context.progress.replace(download.segments.clone());
     on_stage(Stage::Finishing, download);
     let save_path = claim_save_path(download).await?;
     let joining = temp_path(&save_path);
@@ -127,9 +134,19 @@ pub(crate) async fn run(
         return Err(Error::Join(error.to_string()));
     }
     fs::rename(&joining, &save_path).await?;
-    download.total_size = Some(fs::metadata(&save_path).await?.len());
+    set_whole(download, fs::metadata(&save_path).await?.len());
     remove_dir(&dir).await?;
     Ok(save_path)
+}
+
+/// Gives `download` a size of `size` bytes, all of them downloaded, as one finished segment.
+fn set_whole(download: &mut Download, size: u64) {
+    download.total_size = Some(size);
+    download.segments = vec![Segment {
+        downloaded: size,
+        state: SegmentState::Done,
+        ..Segment::new(SegmentId(0), 0, size)
+    }];
 }
 
 /// Downloads `download.url` into the data file `data`, or with `None` into
