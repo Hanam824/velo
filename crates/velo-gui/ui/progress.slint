@@ -104,8 +104,11 @@ export component ProgressWindow inherits Window {
     background: Theme.window;
 
     VerticalBox {
-        alignment: start;
+        // With details shown, a taller window grows the connection table; without, everything
+        // stays at the top.
+        alignment: root.show-details ? LayoutAlignment.stretch : LayoutAlignment.start;
         TabWidget {
+            vertical-stretch: 0;
             Tab {
                 title: "Download status";
                 VerticalBox {
@@ -229,7 +232,7 @@ export component ProgressWindow inherits Window {
         }
 
         if root.show-details: VerticalLayout {
-            alignment: start;
+            vertical-stretch: 1;
             spacing: 6px;
             Text {
                 text: "Start positions and download progress by connections";
@@ -239,7 +242,10 @@ export component ProgressWindow inherits Window {
                 segments: root.segments;
             }
             Rectangle {
-                height: 140px;
+                // 140px by default; it takes the extra height of a taller window.
+                min-height: 140px;
+                preferred-height: 140px;
+                vertical-stretch: 1;
                 border-color: Theme.border;
                 border-width: 1px;
                 VerticalLayout {
