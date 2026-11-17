@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+tracing.workspace = true
 
 [features]
 # Builders of small MP4 streams for tests (velo_mux::testing).
