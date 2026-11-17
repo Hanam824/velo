@@ -129,6 +129,24 @@ async fn a_server_that_keeps_failing_gives_up_and_keeps_the_file() {
 }
 
 #[tokio::test]
+async fn connections_a_server_refuses_are_dropped_and_the_rest_finish() {
+    // Four connections against a server that serves two at a time, with no retries: only
+    // handing refused segments to the connections that work can finish it.
+    let options = Options {
+        max_retries: 0,
+        ..options()
+    };
+    let (_root, progress, result) = download("/limited/data.bin", &options).await;
+    assert!(fs::read(result.unwrap()).unwrap() == body());
+    assert!(
+        progress
+            .snapshot()
+            .iter()
+            .all(|s| s.state == SegmentState::Done)
+    );
+}
+
+#[tokio::test]
 async fn servers_without_ranges_and_empty_files_use_one_connection() {
     let (_root, progress, result) = download("/norange/data.bin", &options()).await;
     assert!(fs::read(result.unwrap()).unwrap() == body());
