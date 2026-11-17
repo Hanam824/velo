@@ -135,10 +135,21 @@ impl Completion {
         window.set_saved_as(path.to_string_lossy().as_ref().into());
         window.set_kind(file_kind(&download.file_name));
 
-        let (desktop, file) = (self.desktop.clone(), path.clone());
-        window.on_open_file(move || desktop.open(&file));
-        let (desktop, file) = (self.desktop.clone(), path);
-        window.on_open_folder(move || desktop.reveal(&file));
+        // Opening the file or its folder is what the dialog was for, so it closes.
+        let (this, id, file) = (Rc::downgrade(self), download.id, path.clone());
+        window.on_open_file(move || {
+            if let Some(this) = this.upgrade() {
+                this.desktop.open(&file);
+                this.close(id);
+            }
+        });
+        let (this, id, file) = (Rc::downgrade(self), download.id, path);
+        window.on_open_folder(move || {
+            if let Some(this) = this.upgrade() {
+                this.desktop.reveal(&file);
+                this.close(id);
+            }
+        });
         let (this, id) = (Rc::downgrade(self), download.id);
         window.on_close_clicked(move || {
             if let Some(this) = this.upgrade() {
@@ -292,7 +303,13 @@ pub mod tests {
         let window = completion.window(download.id).unwrap();
         assert_eq!(window.get_size(), "10 B");
         window.invoke_open_file();
-        window.invoke_open_folder();
+        assert!(completion.window(download.id).is_none(), "Open closes it");
+        completion.finished(&download, &DownloadOptions::default());
+        completion.window(download.id).unwrap().invoke_open_folder();
+        assert!(
+            completion.window(download.id).is_none(),
+            "Open folder closes it"
+        );
         let path = download.save_path();
         assert_eq!(
             *desktop.0.borrow(),
@@ -302,6 +319,8 @@ pub mod tests {
             ]
         );
 
+        completion.finished(&download, &DownloadOptions::default());
+        let window = completion.window(download.id).unwrap();
         window.set_dont_show_again(true);
         window.invoke_close_clicked();
         assert!(completion.window(download.id).is_none());

@@ -560,6 +560,8 @@ mod tests {
         app.show_progress(DownloadId(1));
         let progress = app.progress_window(DownloadId(1)).unwrap();
         shots.take(&progress, 560, 520, "progress");
+        // A taller window gives the connection table the extra height.
+        shots.take(&progress, 560, 760, "progress-tall");
         progress.hide().unwrap();
 
         let complete = CompleteWindow::new().unwrap();
