@@ -465,10 +465,12 @@ mod tests {
         )
         .unwrap();
         let mb = 1024 * 1024;
-        let last_try = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2026, 10, 26, 14, 3, 0)
-            .earliest()
+        let last_try = jiff::civil::date(2026, 10, 26)
+            .at(14, 3, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::system())
             .expect("the afternoon exists in every time zone")
-            .timestamp();
+            .timestamp()
+            .as_second();
         assert_eq!(format::date(last_try), "Oct 26 2026 14:03");
         for download in [
             sample(

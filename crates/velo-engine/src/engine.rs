@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::NaiveDateTime;
+use jiff::civil::DateTime;
 use reqwest::Client;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
@@ -400,8 +400,8 @@ struct Actor {
     /// Downloads paused by hand, which a running queue leaves alone until started again.
     held: HashSet<DownloadId>,
     /// When each queue's schedule last started and stopped it, in local time.
-    last_start: HashMap<QueueId, NaiveDateTime>,
-    last_stop: HashMap<QueueId, NaiveDateTime>,
+    last_start: HashMap<QueueId, DateTime>,
+    last_stop: HashMap<QueueId, DateTime>,
     /// Waiting [`Engine::shutdown`] calls; once set, the engine ends when nothing runs.
     shutdown: Vec<oneshot::Sender<()>>,
 }
@@ -459,7 +459,7 @@ impl Actor {
                     ticks += 1;
                     self.report_progress(ticks.is_multiple_of(SAVE_EVERY));
                     if ticks.is_multiple_of(SCHEDULE_EVERY) {
-                        self.check_schedules(chrono::Local::now().naive_local());
+                        self.check_schedules(jiff::ZonedDateTime::now().datetime());
                     }
                 }
             }
@@ -821,7 +821,7 @@ impl Actor {
     }
 
     /// Starts and stops queues whose schedule says so at `now`, in local time.
-    fn check_schedules(&mut self, now: NaiveDateTime) {
+    fn check_schedules(&mut self, now: DateTime) {
         let mut starts = Vec::new();
         let mut stops = Vec::new();
         for (id, queue) in &self.queues {
