@@ -112,7 +112,7 @@ This section is a summary of the research findings. It drives the UI spec.
 
 ### Segmentation algorithm (IDM's documented behavior)
 1. Start with one connection.
-2. Whenever a connection becomes free, find the segment with the **largest remaining range** and split it in half. The free connection takes the upper half, and the original segment's end shrinks to the midpoint.
+2. Whenever a connection becomes free, find the segment that would take **longest to finish** (its remaining bytes over its connection's measured speed; by remaining bytes while no connection has a speed yet) and split it in half. The free connection takes the upper half, and the original segment's end shrinks to the midpoint.
 3. Reuse keep-alive connections, so fast connections take over work from slow ones.
 4. Stop splitting below a minimum segment size.
 5. Save positions every few seconds so a download can resume.
@@ -154,7 +154,7 @@ scripts/, .github/workflows/, .claude/, CLAUDE.md
 - The segment list is kept sorted by `start`.
 
 **Planner**
-- When a worker is idle, it calls `split_largest(min_seg = 256 KiB)` (the minimum is configurable).
+- When a worker is idle, it calls `split_slowest(min_seg = 256 KiB)` (the minimum is configurable). A connection the server refuses (503 or 429) while others still work hands its segment back and stops, so a server that allows N connections ends up with N.
 - This is a pure function so it can be unit-tested heavily.
 
 **Workers**

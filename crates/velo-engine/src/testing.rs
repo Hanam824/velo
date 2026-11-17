@@ -28,6 +28,8 @@
 //!   [`COOKIES`]; `403` otherwise.
 //! - `/capped/{name}`: like `/files`, but answers `403` to a range longer than [`CAP`] bytes,
 //!   as YouTube does.
+//! - `/limited/{name}`: like `/slow`, but a `GET` while [`LIMIT`] others are still sending is
+//!   refused with `503`, as by a server that allows a client only so many connections.
 //! - `/blob/{name}`: like `/files`, with the bytes given to [`put_blob`] for `name`.
 //! - anything else: `404`.
 
@@ -44,6 +46,18 @@ use axum::http::header::{
 };
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::routing::get;
+
+/// Most `GET`s `/limited` serves at once.
+pub const LIMIT: usize = 2;
+
+/// Counts one `GET` of `/limited` as sending until it is dropped.
+struct Sending(Arc<AtomicUsize>);
+
+impl Drop for Sending {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// Size of the files the server sends.
 pub const SIZE: usize = 300_000;
@@ -135,6 +149,7 @@ pub async fn start() -> String {
     let slow_gets = Arc::new(AtomicUsize::new(0));
     let stall_gets = Arc::new(AtomicUsize::new(0));
     let version = Arc::new(AtomicUsize::new(0));
+    let sending = Arc::new(AtomicUsize::new(0));
     let bump = Arc::clone(&version);
     let app = Router::new()
         .route(
@@ -346,6 +361,31 @@ pub async fn start() -> String {
                     THROTTLED,
                 )
                 .await
+            }),
+        )
+        .route(
+            "/limited/{name}",
+            get(move |method: Method, headers: HeaderMap| {
+                let sending = Arc::clone(&sending);
+                async move {
+                    let response = serve(&method, &headers, &body(), true, &[]);
+                    if method != Method::GET {
+                        return response;
+                    }
+                    if sending.fetch_add(1, Ordering::Relaxed) >= LIMIT {
+                        sending.fetch_sub(1, Ordering::Relaxed);
+                        return status(StatusCode::SERVICE_UNAVAILABLE);
+                    }
+                    let guard = Sending(sending);
+                    let (parts, body) = trickle(response, Cut::Never, SLOW).await.into_parts();
+                    // The guard lives as long as the body, so until it is sent or dropped.
+                    let body =
+                        futures_util::StreamExt::map(body.into_data_stream(), move |chunk| {
+                            let _ = &guard;
+                            chunk
+                        });
+                    Response::from_parts(parts, Body::from_stream(body))
+                }
             }),
         )
         .route(

@@ -77,6 +77,73 @@ struct State {
     written: HashMap<SegmentId, u64>,
     /// Bytes of each segment synced to disk; a segment that is missing has none.
     durable: HashMap<SegmentId, u64>,
+    /// How fast each active segment's worker receives, for the planner to pick which to split.
+    rates: HashMap<SegmentId, Rate>,
+    /// Workers still running. Changed only under the same lock as the planner, so a worker
+    /// that hands its segment back can tell whether another one is left to take it.
+    workers: usize,
+}
+
+/// A worker's receiving speed, averaged over about [`RATE_WINDOW`].
+#[derive(Debug, Clone, Copy)]
+struct Rate {
+    /// When the current sample started.
+    since: Instant,
+    /// Bytes received since `since`.
+    bytes: u64,
+    /// Bytes a second; `None` until the first sample is taken.
+    per_second: Option<f64>,
+}
+
+/// How far back a worker's speed looks.
+const RATE_WINDOW: Duration = Duration::from_secs(3);
+
+/// Shortest time a speed sample spans, so chunks that arrive together don't read as a burst.
+const RATE_SAMPLE: Duration = Duration::from_millis(200);
+
+impl Rate {
+    /// A rate with no reading yet, sampling from now.
+    fn start() -> Self {
+        Self {
+            since: Instant::now(),
+            bytes: 0,
+            per_second: None,
+        }
+    }
+
+    /// Counts `bytes` that arrived just now, and folds the sample into the average once it
+    /// spans [`RATE_SAMPLE`].
+    fn record(&mut self, bytes: u64) {
+        self.bytes += bytes;
+        let elapsed = self.since.elapsed();
+        if elapsed < RATE_SAMPLE {
+            return;
+        }
+        let elapsed = elapsed.as_secs_f64();
+        let sample = self.bytes as f64 / elapsed;
+        // An exponential average whose weight follows the time passed, not the chunk count.
+        let weight = 1.0 - (-elapsed / RATE_WINDOW.as_secs_f64()).exp();
+        self.per_second = Some(
+            self.per_second
+                .map_or(sample, |p| p + weight * (sample - p)),
+        );
+        self.restart();
+    }
+
+    /// Starts a new sample from now, keeping the average, so time spent waiting to retry or
+    /// to connect doesn't count as slow receiving.
+    fn restart(&mut self) {
+        self.since = Instant::now();
+        self.bytes = 0;
+    }
+}
+
+/// The segment with `id` in `segments`; a worker's segment is always there.
+fn segment_mut(segments: &mut [Segment], id: SegmentId) -> &mut Segment {
+    segments
+        .iter_mut()
+        .find(|s| s.id == id)
+        .expect("a worker's segment is never removed")
 }
 
 impl State {
@@ -87,6 +154,8 @@ impl State {
             segments,
             written: durable.clone(),
             durable,
+            rates: HashMap::new(),
+            workers: 0,
         }
     }
 }
@@ -146,13 +215,34 @@ impl Progress {
 
     /// Runs `f` on the segment with `id`, with the list locked.
     pub(crate) fn update<R>(&self, id: SegmentId, f: impl FnOnce(&mut Segment) -> R) -> R {
-        self.with(|segments| {
-            let segment = segments
-                .iter_mut()
-                .find(|s| s.id == id)
-                .expect("a worker's segment is never removed");
-            f(segment)
+        self.with(|segments| f(segment_mut(segments, id)))
+    }
+
+    /// If another worker is still running, hands segment `id` back as pending (unless it is
+    /// done) for that one to take, counts the caller as stopped and returns `true`; the caller
+    /// must then stop. Otherwise changes nothing and returns `false`.
+    fn hand_back(&self, id: SegmentId) -> bool {
+        self.lock(|state| {
+            if state.workers <= 1 {
+                return false;
+            }
+            state.workers -= 1;
+            state.rates.remove(&id);
+            let segment = segment_mut(&mut state.segments, id);
+            if segment.state == SegmentState::Active {
+                segment.state = SegmentState::Pending;
+            }
+            true
         })
+    }
+
+    /// Starts a new speed sample for segment `id`, as its worker starts receiving again.
+    fn restart_rate(&self, id: SegmentId) {
+        self.lock(|state| {
+            if let Some(rate) = state.rates.get_mut(&id) {
+                rate.restart();
+            }
+        });
     }
 
     /// Records that segment `id`'s counted bytes are all handed to the OS.
@@ -186,11 +276,7 @@ impl Progress {
     fn roll_back(&self, id: SegmentId) -> u64 {
         self.lock(|state| {
             let written = state.written.get(&id).copied().unwrap_or(0);
-            let segment = state
-                .segments
-                .iter_mut()
-                .find(|s| s.id == id)
-                .expect("a worker's segment is never removed");
+            let segment = segment_mut(&mut state.segments, id);
             segment.downloaded = written.min(segment.len());
             segment.downloaded
         })
@@ -247,6 +333,7 @@ pub async fn download_segments(
         stop: cancel.child_token(),
     });
     let mut workers = JoinSet::new();
+    progress.lock(|state| state.workers = options.max_connections.max(1) as usize);
     for _ in 0..options.max_connections.max(1) {
         let worker = Arc::clone(&worker);
         workers.spawn(async move { worker.run().await });
@@ -295,7 +382,8 @@ pub async fn download_segments(
             error
         });
     }
-    // A worker only stops early on an error, so all segments are done here.
+    // Workers stop early only on an error, or after handing their segment to a worker still
+    // running (`State::workers`), so all segments are done here.
     debug_assert!(progress.with(|s| s.iter().all(|s| s.state == SegmentState::Done)));
     Ok(())
 }
@@ -334,25 +422,44 @@ impl Worker {
             if self.stop.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let next = self
-                .progress
-                .with(|segments| planner::next_work(segments, self.options.min_segment_size));
+            let next = self.progress.lock(|state| {
+                let rates = &state.rates;
+                let next =
+                    planner::next_work(&mut state.segments, self.options.min_segment_size, |id| {
+                        rates.get(&id).and_then(|r| r.per_second)
+                    });
+                if next.is_none() {
+                    state.workers -= 1;
+                }
+                next
+            });
             let Some(id) = next else {
                 return Ok(());
             };
-            self.fetch_with_retries(id).await?;
+            if !self.fetch_with_retries(id).await? {
+                return Ok(());
+            }
         }
     }
 
-    /// Fetches segment `id`, retrying errors that may go away with exponential backoff.
-    async fn fetch_with_retries(&self, id: SegmentId) -> Result<()> {
+    /// Fetches segment `id`, retrying errors that may go away with exponential backoff, and
+    /// returns `true` once it is done.
+    ///
+    /// When the server refuses the connection (`503` or `429`) while another worker is still
+    /// running, as a server that allows fewer connections than Velo opens does, the segment is
+    /// handed to that worker at once and this returns `false`: the caller stops.
+    async fn fetch_with_retries(&self, id: SegmentId) -> Result<bool> {
         let mut failures = 0;
         loop {
             let before = self.progress.update(id, |s| s.downloaded);
             let error = match self.fetch(id).await {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(true),
                 Err(error) => error,
             };
+            if is_refusal(&error) && self.progress.hand_back(id) {
+                tracing::warn!(segment = id.0, %error, "dropping a connection the server refuses");
+                return Ok(false);
+            }
             if self.progress.update(id, |s| s.downloaded) > before {
                 failures = 0;
             }
@@ -441,6 +548,7 @@ impl Worker {
             send_range(&self.client, &self.url, position, Some(request_end)),
         )
         .await?;
+        self.progress.restart_rate(id);
         let mut left = request_end - position;
         while left > 0 {
             let Some(chunk) =
@@ -458,12 +566,20 @@ impl Worker {
                 })
                 .await?;
             }
-            let (take, done) = self.progress.update(id, |s| {
+            let (take, done) = self.progress.lock(|state| {
+                let s = segment_mut(&mut state.segments, id);
                 let take = (chunk.len() as u64).min(left).min(s.remaining()) as usize;
                 s.downloaded += take as u64;
                 let done = s.remaining() == 0;
                 if done {
                     s.state = SegmentState::Done;
+                    state.rates.remove(&id);
+                } else {
+                    state
+                        .rates
+                        .entry(id)
+                        .and_modify(|r| r.record(take as u64))
+                        .or_insert_with(Rate::start);
                 }
                 (take, done)
             });
@@ -484,6 +600,15 @@ impl Worker {
         let (received, expected) = self.progress.update(id, |s| (s.downloaded, s.len()));
         Err(Error::Incomplete { received, expected })
     }
+}
+
+/// Whether `error` is the server turning this connection away for now, as a server that limits
+/// connections per client does.
+fn is_refusal(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Status(StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS)
+    )
 }
 
 /// Whether trying again later might fix `error`.

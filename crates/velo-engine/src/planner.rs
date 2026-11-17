@@ -19,32 +19,63 @@ pub fn initial_segments(total: u64) -> Vec<Segment> {
 ///
 /// A pending segment with bytes left comes first (the one with the most bytes left), so work
 /// left over from a stopped worker or a resume is picked up before anything is split. Otherwise
-/// the active segment with the most bytes left is split with [`split_largest`]. Returns `None`
+/// an active segment is split with [`split_slowest`], which `speed` (bytes a second of each
+/// active segment's worker, if known) steers to the one that would finish last. Returns `None`
 /// when there is nothing worth another connection.
-pub fn next_work(segments: &mut Vec<Segment>, min_segment_size: u64) -> Option<SegmentId> {
+pub fn next_work(
+    segments: &mut Vec<Segment>,
+    min_segment_size: u64,
+    speed: impl Fn(SegmentId) -> Option<f64>,
+) -> Option<SegmentId> {
     if let Some(index) = largest_remaining(segments, SegmentState::Pending) {
         let segment = &mut segments[index];
         segment.state = SegmentState::Active;
         return Some(segment.id);
     }
-    split_largest(segments, min_segment_size)
+    split_slowest(segments, min_segment_size, speed)
 }
 
-/// Splits the active segment with the most bytes left in half and returns the new upper half,
-/// which is marked active for the caller's worker.
+/// Splits the active segment that would take longest to finish in half and returns the new
+/// upper half, which is marked active for the caller's worker.
 ///
-/// The original segment's `end` shrinks to the midpoint of its remaining bytes, so its worker
-/// must stop there. Nothing is split unless both halves would have at least `min_segment_size`
-/// bytes left; then this returns `None`.
-pub fn split_largest(segments: &mut Vec<Segment>, min_segment_size: u64) -> Option<SegmentId> {
-    let index = largest_remaining(segments, SegmentState::Active)?;
-    let half = segments[index].remaining() / 2;
-    if half == 0 || half < min_segment_size {
-        return None;
-    }
+/// Only segments whose halves would both have at least `min_segment_size` bytes left are
+/// candidates; `None` if there are none. Of the candidates whose speed `speed` knows, the one
+/// with the most time left is split, so a slow connection gets help before a fast one; a
+/// candidate with no speed yet (a new one) is passed over. If none has a speed, the one with
+/// the most bytes left is split. Ties go to the lowest `start`. The original segment's `end`
+/// shrinks to the midpoint of its remaining bytes, so its worker must stop there.
+pub fn split_slowest(
+    segments: &mut Vec<Segment>,
+    min_segment_size: u64,
+    speed: impl Fn(SegmentId) -> Option<f64>,
+) -> Option<SegmentId> {
+    let candidates: Vec<usize> = (0..segments.len())
+        .filter(|&i| {
+            let half = segments[i].remaining() / 2;
+            segments[i].state == SegmentState::Active && half > 0 && half >= min_segment_size
+        })
+        .collect();
+    let speeds: Vec<Option<f64>> = candidates
+        .iter()
+        .map(|&i| speed(segments[i].id).filter(|s| *s > 0.0))
+        .collect();
+    let any_speed = speeds.iter().any(Option::is_some);
+    let time_left = |n: usize| {
+        let remaining = segments[candidates[n]].remaining() as f64;
+        match speeds[n] {
+            Some(speed) => remaining / speed,
+            None if any_speed => f64::NEG_INFINITY,
+            None => remaining,
+        }
+    };
+    // `max_by` keeps the last of equal maxima, so walk backwards to prefer the lowest start.
+    let best = (0..candidates.len())
+        .rev()
+        .max_by(|&a, &b| time_left(a).total_cmp(&time_left(b)))?;
+    let index = candidates[best];
     let id = next_id(segments);
     let original = &mut segments[index];
-    let mid = original.position() + half;
+    let mid = original.position() + original.remaining() / 2;
     let mut upper = Segment::new(id, mid, original.end);
     upper.state = SegmentState::Active;
     original.end = mid;
@@ -82,6 +113,11 @@ mod tests {
 
     const KIB: u64 = 1024;
 
+    /// A speed lookup that knows nothing, so splits go by bytes left.
+    fn no_speed(_: SegmentId) -> Option<f64> {
+        None
+    }
+
     /// Asserts the planner's invariants: sorted, tiling `[0, total)`, unique ids and no segment
     /// downloaded past its end.
     fn assert_tiles(segments: &[Segment], total: u64) {
@@ -115,11 +151,17 @@ mod tests {
     #[test]
     fn idle_workers_split_the_largest_remaining_range_in_half() {
         let mut segments = initial_segments(1024 * KIB);
-        assert_eq!(next_work(&mut segments, 256 * KIB), Some(SegmentId(0)));
+        assert_eq!(
+            next_work(&mut segments, 256 * KIB, no_speed),
+            Some(SegmentId(0))
+        );
         segments[0].downloaded = 24 * KIB;
 
         // 1000 KiB left: the new worker takes the upper 500 KiB.
-        assert_eq!(next_work(&mut segments, 256 * KIB), Some(SegmentId(1)));
+        assert_eq!(
+            next_work(&mut segments, 256 * KIB, no_speed),
+            Some(SegmentId(1))
+        );
         assert_eq!((segments[0].start, segments[0].end), (0, 524 * KIB));
         assert_eq!(
             (segments[1].start, segments[1].end),
@@ -128,7 +170,7 @@ mod tests {
         assert_eq!(segments[1].state, SegmentState::Active);
 
         // 500 KiB left in each: halves of 250 KiB are below the minimum.
-        assert_eq!(next_work(&mut segments, 256 * KIB), None);
+        assert_eq!(next_work(&mut segments, 256 * KIB, no_speed), None);
         assert_eq!(segments.len(), 2);
     }
 
@@ -139,7 +181,7 @@ mod tests {
             Segment::new(SegmentId(1), 100, 400),
         ];
         segments[0].state = SegmentState::Active;
-        assert_eq!(next_work(&mut segments, 1), Some(SegmentId(1)));
+        assert_eq!(next_work(&mut segments, 1, no_speed), Some(SegmentId(1)));
         assert_eq!(segments.len(), 2);
     }
 
@@ -152,11 +194,70 @@ mod tests {
         for segment in &mut segments {
             segment.state = SegmentState::Active;
         }
-        assert_eq!(split_largest(&mut segments, 1), Some(SegmentId(6)));
+        assert_eq!(
+            split_slowest(&mut segments, 1, no_speed),
+            Some(SegmentId(6))
+        );
         assert_eq!(
             segments.iter().map(|s| s.id.0).collect::<Vec<_>>(),
             [5, 6, 2]
         );
+    }
+
+    #[test]
+    fn the_segment_that_would_finish_last_is_split() {
+        // 800 KiB left at 1 MiB/s against 400 KiB left at 100 KiB/s.
+        let mut segments = vec![
+            Segment::new(SegmentId(0), 0, 800 * KIB),
+            Segment::new(SegmentId(1), 800 * KIB, 1200 * KIB),
+        ];
+        for segment in &mut segments {
+            segment.state = SegmentState::Active;
+        }
+        let speed = |id: SegmentId| Some(if id.0 == 0 { 1024.0 } else { 100.0 } * KIB as f64);
+        assert_eq!(
+            next_work(&mut segments, 64 * KIB, speed),
+            Some(SegmentId(2))
+        );
+        assert_eq!(
+            (segments[1].start, segments[1].end),
+            (800 * KIB, 1000 * KIB)
+        );
+        assert_eq!(
+            (segments[2].start, segments[2].end),
+            (1000 * KIB, 1200 * KIB)
+        );
+
+        // A segment with no speed yet is passed over, even with the most bytes left.
+        let partial = |id: SegmentId| (id.0 == 1).then_some(1.0);
+        assert_eq!(
+            split_slowest(&mut segments, 64 * KIB, partial),
+            Some(SegmentId(3))
+        );
+        assert_eq!((segments[1].start, segments[1].end), (800 * KIB, 900 * KIB));
+        assert_eq!(segments[0].end, 800 * KIB);
+
+        // With no speed at all, the most bytes left wins.
+        assert_eq!(
+            split_slowest(&mut segments, 64 * KIB, no_speed),
+            Some(SegmentId(4))
+        );
+        assert_eq!(segments[0].end, 400 * KIB);
+    }
+
+    #[test]
+    fn a_segment_too_small_to_split_doesnt_stop_others_being_split() {
+        let mut segments = vec![
+            Segment::new(SegmentId(0), 0, 100),
+            Segment::new(SegmentId(1), 100, 1100),
+        ];
+        for segment in &mut segments {
+            segment.state = SegmentState::Active;
+        }
+        // The small one is far slower, but halves of 50 bytes are below the minimum.
+        let speed = |id: SegmentId| Some(if id.0 == 0 { 0.001 } else { 1000.0 });
+        assert_eq!(split_slowest(&mut segments, 100, speed), Some(SegmentId(2)));
+        assert_eq!(segments[1].end, 600);
     }
 
     /// One step of a simulated download.
@@ -202,13 +303,14 @@ mod tests {
             total in 1..=64 * 1024 * KIB,
             min_segment_size in 1..=1024 * KIB,
             steps in prop::collection::vec(step(), 0..200),
+            speeds in prop::collection::vec(prop::option::of(0.0..1e9f64), 1..8),
         ) {
             let mut segments = initial_segments(total);
             for step in steps {
                 match step {
                     Step::Idle => {
                         let before: Vec<Segment> = segments.clone();
-                        if let Some(id) = next_work(&mut segments, min_segment_size) {
+                        if let Some(id) = next_work(&mut segments, min_segment_size, |id| speeds.get(id.0 as usize % speeds.len()).copied().flatten()) {
                             let taken = segments.iter().find(|s| s.id == id).unwrap();
                             prop_assert_eq!(taken.state, SegmentState::Active);
                             prop_assert!(taken.remaining() > 0);
@@ -241,13 +343,14 @@ mod tests {
             total in 1..=64 * 1024 * KIB,
             min_segment_size in 1..=1024 * KIB,
             workers in 1..=32usize,
+            speeds in prop::collection::vec(prop::option::of(0.0..1e9f64), 1..8),
         ) {
             let mut segments = initial_segments(total);
             // Each worker fetches a quarter of its segment per round (at least one byte).
             for _ in 0..100_000 {
                 let active = segments.iter().filter(|s| s.state == SegmentState::Active).count();
                 for _ in active..workers {
-                    if next_work(&mut segments, min_segment_size).is_none() {
+                    if next_work(&mut segments, min_segment_size, |id| speeds.get(id.0 as usize % speeds.len()).copied().flatten()).is_none() {
                         break;
                     }
                 }
