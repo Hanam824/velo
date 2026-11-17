@@ -321,6 +321,8 @@ impl DownloadTable {
             (_, None) => format::size(downloaded),
         };
         let running = download.is_running();
+        // Only while bytes arrive: there is no rate to show while connecting or finishing.
+        let receiving = download.state == DownloadState::Downloading;
         DownloadRow {
             id: download.id.0 as i32,
             name: download.file_name.as_str().into(),
@@ -340,11 +342,11 @@ impl DownloadTable {
             failed: matches!(download.state, DownloadState::Failed(_)),
             time_left: self
                 .time_left(download)
-                .filter(|_| running)
+                .filter(|_| receiving)
                 .map(format::duration)
                 .unwrap_or_default()
                 .into(),
-            rate: if running {
+            rate: if receiving {
                 format::rate(self.rate(download)).into()
             } else {
                 Default::default()

@@ -216,8 +216,10 @@ fn fill(window: &ProgressWindow, download: &Download, table: &DownloadTable) {
         }
         .into(),
     );
+    // Only while bytes arrive: there is no rate to show while connecting or finishing.
+    let receiving = download.state == DownloadState::Downloading;
     window.set_rate(
-        if running {
+        if receiving {
             format::rate(table.rate_of(download.id))
         } else {
             String::new()
@@ -227,7 +229,7 @@ fn fill(window: &ProgressWindow, download: &Download, table: &DownloadTable) {
     window.set_time_left(
         table
             .time_left(download)
-            .filter(|_| running)
+            .filter(|_| receiving)
             .map(format::duration)
             .unwrap_or_default()
             .into(),
@@ -351,6 +353,24 @@ mod tests {
         let connections = window.get_connections();
         assert_eq!(connections.row_data(0).unwrap().info, "Receiving data…");
         assert_eq!(connections.row_data(1).unwrap().info, "Connecting…");
+    }
+
+    #[test]
+    fn a_finishing_download_shows_no_rate_or_time_left() {
+        let (dialogs, _) = dialogs();
+        let (mut download, update) = running();
+        let mut table = DownloadTable::default();
+        table.upsert(download.clone());
+        table.set_progress(update);
+        download.state = DownloadState::Merging;
+        table.upsert(download.clone());
+        dialogs.open(download.id, &table).unwrap();
+        let window = dialogs.window(download.id).unwrap();
+
+        assert_eq!(window.get_status(), "Finishing…");
+        assert_eq!(window.get_rate(), "");
+        assert_eq!(window.get_time_left(), "");
+        assert!(window.get_running(), "it can still be stopped");
     }
 
     #[test]
