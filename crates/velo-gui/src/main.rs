@@ -525,8 +525,7 @@ mod tests {
                 })
                 .collect(),
         })]);
-        ui.set_selected_id(2);
-        ui.invoke_selection_changed(2);
+        ui.invoke_row_pressed(2, false, false);
         for (appearance, name) in [(Appearance::Light, "light"), (Appearance::Dark, "dark")] {
             ui.global::<Theme>().invoke_apply(appearance);
             shots.take(&ui, 1100, 560, &format!("main-{name}"));
@@ -534,8 +533,7 @@ mod tests {
         // The toolbar's icons follow the selection: a running and a finished download.
         ui.global::<Theme>().invoke_apply(Appearance::Light);
         for (id, name) in [(1, "running"), (3, "finished")] {
-            ui.set_selected_id(id);
-            ui.invoke_selection_changed(id);
+            ui.invoke_row_pressed(id, false, false);
             shots.take(&ui, 1100, 560, &format!("main-{name}-selected"));
         }
         ui.hide().unwrap();

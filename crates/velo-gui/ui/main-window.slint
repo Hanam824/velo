@@ -35,13 +35,14 @@ export component AppWindow inherits Window {
     in-out property <string> selected-category: "all";
     in-out property <bool> show-categories: true;
     in property <[DownloadRow]> downloads;
-    in-out property <int> selected-id: -1;
+    // The current row of the download list, or -1; Rust keeps the selection.
+    in property <int> current-id: -1;
     in property <int> sort-column: 0;
     in property <bool> sort-ascending: true;
     in property <string> status-message: "Ready";
     in property <string> status-summary;
 
-    // Toolbar and menu state, set from the selected download.
+    // Toolbar and menu state, set from the selected downloads.
     in property <bool> can-resume;
     in property <bool> can-stop;
     in property <bool> can-stop-all;
@@ -65,18 +66,21 @@ export component AppWindow inherits Window {
     callback add-category();
     callback edit-category(key: string);
     callback delete-category(key: string);
-    callback selection-changed(id: int);
+    // A row was pressed, with Ctrl (`toggle`) or Shift (`range`).
+    callback row-pressed(id: int, toggle: bool, range: bool);
+    callback select-all();
     callback download-activated(id: int);
     callback sort(column: int);
-    callback move-selection(delta: int);
+    callback move-selection(delta: int, extend: bool);
     callback resume-download(id: int);
     callback stop-download(id: int);
     callback delete-download(id: int);
     callback open-file(id: int);
     callback open-folder(id: int);
     callback properties(id: int);
-    // The user confirmed deleting download `id`, and its finished file too if `delete-file`.
-    callback delete-confirmed(id: int, delete-file: bool);
+    // The user confirmed the deletion `ask-delete` asked about, with the finished files too if
+    // `delete-files`.
+    callback delete-confirmed(delete-files: bool);
     callback appearance-changed(appearance: Appearance);
     callback options();
     callback scheduler();
@@ -87,18 +91,18 @@ export component AppWindow inherits Window {
     callback quit();
 
     private property <length> categories-width: 200px;
-    private property <int> pending-delete-id: -1;
-    private property <string> pending-delete-name;
-    private property <bool> pending-delete-complete;
-    private property <bool> pending-delete-file;
+    private property <string> delete-title;
+    private property <string> delete-note;
+    private property <string> delete-file-option;
+    private property <bool> delete-files;
 
-    // Asks whether to delete download `id`, named `name`; a `complete` one can take its file
-    // along.
-    public function ask-delete(id: int, name: string, complete: bool) {
-        root.pending-delete-id = id;
-        root.pending-delete-name = name;
-        root.pending-delete-complete = complete;
-        root.pending-delete-file = false;
+    // Asks `title`, with `note` below it and a check box `file-option` to delete the finished
+    // files too; an empty `note` or `file-option` isn't shown.
+    public function ask-delete(title: string, note: string, file-option: string) {
+        root.delete-title = title;
+        root.delete-note = note;
+        root.delete-file-option = file-option;
+        root.delete-files = false;
         confirm-delete.show();
     }
 
@@ -138,6 +142,11 @@ export component AppWindow inherits Window {
         }
         Menu {
             title: "Downloads";
+            MenuItem {
+                title: "Select All";
+                activated => { root.select-all(); }
+            }
+            MenuSeparator { }
             MenuItem {
                 title: "Stop All";
                 enabled: root.can-stop-all;
@@ -243,20 +252,19 @@ export component AppWindow inherits Window {
             drop-shadow-color: #00000040;
             VerticalBox {
                 Text {
-                    text: "Delete “" + root.pending-delete-name + "” from the list?";
+                    text: root.delete-title;
                     wrap: word-wrap;
                     font-weight: 600;
                     color: Theme.text;
                 }
-                if !root.pending-delete-complete: Text {
-                    text: "The part of it downloaded so far is deleted too.";
+                if root.delete-note != "": Text {
+                    text: root.delete-note;
                     wrap: word-wrap;
                     color: Theme.text-muted;
                 }
-                CheckBox {
-                    visible: root.pending-delete-complete;
-                    checked <=> root.pending-delete-file;
-                    text: "Also delete the file from disk";
+                if root.delete-file-option != "": CheckBox {
+                    checked <=> root.delete-files;
+                    text: root.delete-file-option;
                 }
                 HorizontalLayout {
                     alignment: end;
@@ -266,8 +274,7 @@ export component AppWindow inherits Window {
                         primary: true;
                         clicked => {
                             confirm-delete.close();
-                            root.delete-confirmed(root.pending-delete-id,
-                                root.pending-delete-complete && root.pending-delete-file);
+                            root.delete-confirmed(root.delete-file-option != "" && root.delete-files);
                         }
                     }
                     Button {
@@ -327,13 +334,15 @@ export component AppWindow inherits Window {
                 queue-choices: root.queue-choices;
                 enqueue(id, queue) => { root.enqueue(id, queue); }
                 dequeue(id) => { root.dequeue(id); }
-                selected-id <=> root.selected-id;
+                current-id: root.current-id;
                 sort-column: root.sort-column;
                 sort-ascending: root.sort-ascending;
-                selection-changed(id) => { root.selection-changed(id); }
+                pressed(id, toggle, range) => { root.row-pressed(id, toggle, range); }
+                select-all => { root.select-all(); }
+                delete-selected => { root.delete(); }
                 activated(id) => { root.download-activated(id); }
                 sort(column) => { root.sort(column); }
-                move-selection(delta) => { root.move-selection(delta); }
+                move-selection(delta, extend) => { root.move-selection(delta, extend); }
                 resume(id) => { root.resume-download(id); }
                 stop(id) => { root.stop-download(id); }
                 delete(id) => { root.delete-download(id); }

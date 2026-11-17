@@ -10,7 +10,7 @@ use std::rc::Rc;
 use slint::{ComponentHandle, Model, VecModel};
 use std::collections::HashSet;
 
-use velo_core::{Download, DownloadId, DownloadState, EngineEvent, Queue, QueueId};
+use velo_core::{Download, DownloadId, EngineEvent, Queue, QueueId};
 use velo_engine::{DownloadEdit, Engine, NewDownload};
 
 use crate::categories::CategoryTree;
@@ -139,6 +139,9 @@ pub struct App {
     running_queues: RefCell<HashSet<QueueId>>,
     queue_choices: Rc<VecModel<QueueChoice>>,
     scheduler: Rc<SchedulerDialog>,
+    /// The downloads the delete confirmation asks about, and whether each is finished, as they
+    /// were when it opened.
+    pending_delete: RefCell<Vec<(DownloadId, bool)>>,
 }
 
 impl App {
@@ -156,6 +159,7 @@ impl App {
         let queues: Queues = Rc::default();
         let app = Rc::new(Self {
             scheduler: SchedulerDialog::new(commands.clone(), config.clone(), queues.clone()),
+            pending_delete: RefCell::default(),
             queues,
             running_queues: RefCell::default(),
             queue_choices: Rc::new(VecModel::default()),
@@ -210,7 +214,6 @@ impl App {
                 app.rebuild_categories();
             }
         });
-        ui.on_selection_changed(with(self, |app, _| app.refresh()));
         ui.on_scheduler(with0(self, |app| {
             let target = app.target_queue();
             let running = app.running_queues.borrow().clone();
@@ -226,41 +229,47 @@ impl App {
         }));
         let enqueue = with(self, |app, (raw, queue): (i32, i32)| {
             if let (Some(id), Ok(queue)) = (download_id(raw), u32::try_from(queue)) {
-                app.commands.enqueue(QueueId(queue), vec![id]);
+                app.commands.enqueue(QueueId(queue), app.targets(id));
             }
         });
         ui.on_enqueue(move |raw, queue| enqueue((raw, queue)));
-        ui.on_dequeue(on_row(self, |app, id| app.commands.dequeue(vec![id])));
+        ui.on_dequeue(on_row(self, |app, id| {
+            app.commands.dequeue(app.targets(id))
+        }));
         ui.on_sort(with(self, |app, column| {
             if let Some(column) = Column::from_index(column) {
                 app.table.borrow_mut().sort_by(column);
                 app.refresh();
             }
         }));
-        ui.on_move_selection(with(self, |app, delta| {
-            let next = app.table.borrow().neighbour(app.selected(), delta);
-            if let (Some(ui), Some(next)) = (app.ui.upgrade(), next) {
-                ui.set_selected_id(next.0 as i32);
+        let pressed = with(self, |app, (raw, toggle, range)| {
+            if let Some(id) = download_id(raw) {
+                app.table.borrow_mut().press(id, toggle, range);
                 app.refresh();
             }
+        });
+        ui.on_row_pressed(move |raw, toggle, range| pressed((raw, toggle, range)));
+        ui.on_select_all(with0(self, |app| {
+            app.table.borrow_mut().select_all();
+            app.refresh();
         }));
+        let move_selection = with(self, |app, (delta, extend)| {
+            app.table.borrow_mut().move_selection(delta, extend);
+            app.refresh();
+        });
+        ui.on_move_selection(move |delta, extend| move_selection((delta, extend)));
 
         // Toolbar: act on the selection.
-        ui.on_resume(on_selected(self, |app, id| app.commands.resume(id)));
-        ui.on_stop(on_selected(self, |app, id| app.commands.pause(id)));
-        ui.on_delete(on_selected(self, App::ask_delete));
+        ui.on_resume(with0(self, |app| app.resume(&app.selection())));
+        ui.on_stop(with0(self, |app| app.stop(&app.selection())));
+        ui.on_delete(with0(self, |app| app.ask_delete(&app.selection())));
         ui.on_stop_all(with0(self, |app| app.commands.pause_all()));
         ui.on_delete_completed(with0(self, App::delete_completed));
 
-        // Context menu: act on the row's download.
-        ui.on_resume_download(on_row(self, |app, id| app.commands.resume(id)));
-        ui.on_stop_download(on_row(self, |app, id| app.commands.pause(id)));
-        ui.on_delete_download(on_row(self, App::ask_delete));
-        let confirmed = with(self, |app, (raw, delete_file)| {
-            if let Some(id) = download_id(raw) {
-                app.commands.delete(id, delete_file);
-            }
-        });
+        // Context menu: act on the selection if the row is in it, else on the row's download.
+        ui.on_resume_download(on_row(self, |app, id| app.resume(&app.targets(id))));
+        ui.on_stop_download(on_row(self, |app, id| app.stop(&app.targets(id))));
+        ui.on_delete_download(on_row(self, |app, id| app.ask_delete(&app.targets(id))));
         // A finished download opens its file; any other shows its progress.
         ui.on_download_activated(on_row(self, |app, id| match app.finished_file(id) {
             Some(path) => app.desktop.open(&path),
@@ -288,20 +297,64 @@ impl App {
                 tracing::warn!(%error, "couldn't open Properties");
             }
         }));
-        ui.on_delete_confirmed(move |raw, delete_file| confirmed((raw, delete_file)));
+        ui.on_delete_confirmed(with(self, |app, delete_files| {
+            for (id, finished) in app.pending_delete.take() {
+                app.commands.delete(id, delete_files && finished);
+            }
+        }));
     }
 
-    /// Asks the user to confirm deleting download `id`.
-    fn ask_delete(&self, id: DownloadId) {
+    /// The selected downloads, in display order.
+    fn selection(&self) -> Vec<DownloadId> {
+        let table = self.table.borrow();
+        table.selection().iter().map(|d| d.id).collect()
+    }
+
+    /// What a context-menu command on row `id` acts on: the whole selection if the row is in
+    /// it, else just that download.
+    fn targets(&self, id: DownloadId) -> Vec<DownloadId> {
+        if self.table.borrow().is_selected(id) {
+            self.selection()
+        } else {
+            vec![id]
+        }
+    }
+
+    /// Resumes each of `ids` that can be resumed.
+    fn resume(&self, ids: &[DownloadId]) {
+        for id in self.filtered(ids, crate::toolbar::can_resume) {
+            self.commands.resume(id);
+        }
+    }
+
+    /// Stops each of `ids` that is running.
+    fn stop(&self, ids: &[DownloadId]) {
+        for id in self.filtered(ids, Download::is_running) {
+            self.commands.pause(id);
+        }
+    }
+
+    /// The downloads of `ids` that exist and pass `keep`.
+    fn filtered(&self, ids: &[DownloadId], keep: impl Fn(&Download) -> bool) -> Vec<DownloadId> {
+        let table = self.table.borrow();
+        ids.iter()
+            .filter(|&&id| table.get(id).is_some_and(&keep))
+            .copied()
+            .collect()
+    }
+
+    /// Asks the user to confirm deleting the downloads `ids`.
+    fn ask_delete(&self, ids: &[DownloadId]) {
         let Some(ui) = self.ui.upgrade() else { return };
-        let Some(download) = self.table.borrow().get(id).cloned() else {
+        let table = self.table.borrow();
+        let downloads: Vec<&Download> = ids.iter().filter_map(|&id| table.get(id)).collect();
+        let Some((title, note, file_option)) = delete_prompt(&downloads) else {
             return;
         };
-        ui.invoke_ask_delete(
-            id.0 as i32,
-            download.file_name.into(),
-            download.state == DownloadState::Complete,
-        );
+        *self.pending_delete.borrow_mut() =
+            downloads.iter().map(|d| (d.id, d.is_finished())).collect();
+        drop(table);
+        ui.invoke_ask_delete(title.into(), note.into(), file_option.into());
     }
 
     /// Opens download `id`'s progress dialog.
@@ -474,12 +527,6 @@ impl App {
         downloads.into_iter().map(|d| d.url).collect()
     }
 
-    /// The selected download, if it still exists.
-    pub fn selected(&self) -> Option<DownloadId> {
-        let id = download_id(self.ui.upgrade()?.get_selected_id())?;
-        self.table.borrow().is_visible(id).then_some(id)
-    }
-
     /// Pushes the table into the window: rows, sort arrows, toolbar state and status bar.
     pub fn refresh(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
@@ -499,11 +546,8 @@ impl App {
         ui.set_sort_column(column.index());
         ui.set_sort_ascending(ascending);
 
-        let selected = self.selected().and_then(|id| table.get(id));
-        if selected.is_none() {
-            ui.set_selected_id(-1);
-        }
-        ToolbarState::new(selected, table.downloads()).apply(&ui);
+        ui.set_current_id(table.current().map_or(-1, |id| id.0 as i32));
+        ToolbarState::new(&table.selection(), table.downloads()).apply(&ui);
         let target_running = self.running_queues.borrow().contains(&self.target_queue());
         ui.set_can_start_queue(!target_running);
         ui.set_can_stop_queue(target_running);
@@ -538,21 +582,45 @@ fn with0(app: &Rc<App>, f: impl Fn(&App) + 'static) -> impl Fn() + 'static {
     move || callback(())
 }
 
-/// Wraps `f` as a toolbar callback that runs on the selected download, if any.
-fn on_selected(app: &Rc<App>, f: impl Fn(&App, DownloadId) + 'static) -> impl Fn() + 'static {
-    with0(app, move |app| {
-        if let Some(id) = app.selected() {
-            f(app, id);
-        }
-    })
-}
-
 /// Wraps `f` as a context-menu callback that runs on the row's download.
 fn on_row(app: &Rc<App>, f: impl Fn(&App, DownloadId) + 'static) -> impl Fn(i32) + 'static {
     with(app, move |app, raw| {
         if let Some(id) = download_id(raw) {
             f(app, id);
         }
+    })
+}
+
+/// The delete confirmation for `downloads`: its question, the note under it and the check box
+/// to delete the finished files too (empty when not shown); `None` if there is nothing to delete.
+fn delete_prompt(downloads: &[&Download]) -> Option<(String, String, String)> {
+    let any_finished = downloads.iter().any(|d| d.is_finished());
+    let any_unfinished = downloads.iter().any(|d| !d.is_finished());
+    let shown = |shown: bool, text: &str| {
+        if shown {
+            text.to_string()
+        } else {
+            String::new()
+        }
+    };
+    Some(match downloads {
+        [] => return None,
+        [download] => (
+            format!("Delete “{}” from the list?", download.file_name),
+            shown(
+                any_unfinished,
+                "The part of it downloaded so far is deleted too.",
+            ),
+            shown(any_finished, "Also delete the file from disk"),
+        ),
+        _ => (
+            format!("Delete {} downloads from the list?", downloads.len()),
+            shown(
+                any_unfinished,
+                "What the unfinished ones downloaded so far is deleted too.",
+            ),
+            shown(any_finished, "Also delete the finished files from disk"),
+        ),
     })
 }
 
@@ -743,12 +811,13 @@ pub mod tests {
             EngineEvent::Added(video),
             EngineEvent::Added(sample(2, "b.dat", DownloadState::Paused, 0, 1)),
         ]);
-        ui.set_selected_id(2);
+        ui.invoke_row_pressed(2, false, false);
         ui.invoke_category_selected("all/Video".into());
         assert_eq!(ui.get_downloads().row_count(), 1);
         assert_eq!(ui.get_status_message(), "1 of 2 downloads");
         // The selection is hidden by the filter, so nothing is selected.
-        assert_eq!(ui.get_selected_id(), -1);
+        assert_eq!(ui.get_current_id(), -1);
+        assert!(!ui.get_can_delete());
 
         // Deleting the selected category falls back to All Downloads.
         ui.set_selected_category("all/Video".into());
@@ -869,16 +938,27 @@ pub mod tests {
         assert!(ui.get_can_stop_all() && ui.get_can_delete_completed());
 
         // Selecting the running download enables Stop.
-        ui.set_selected_id(1);
-        ui.invoke_selection_changed(1);
+        ui.invoke_row_pressed(1, false, false);
         assert!(ui.get_can_stop() && !ui.get_can_resume());
+        let selected = |ui: &AppWindow| -> Vec<i32> {
+            ui.get_downloads()
+                .iter()
+                .filter(|r| r.selected)
+                .map(|r| r.id)
+                .collect()
+        };
+        assert_eq!(selected(&ui), [1]);
 
         // Arrow keys move through the rows (newest try first); removing the selection clears it.
-        ui.invoke_move_selection(-1);
-        assert_eq!(ui.get_selected_id(), 2);
+        ui.invoke_move_selection(-1, false);
+        assert_eq!((ui.get_current_id(), selected(&ui)), (2, vec![2]));
+        ui.invoke_move_selection(1, true);
+        assert_eq!((ui.get_current_id(), selected(&ui)), (1, vec![2, 1]));
         app.apply([EngineEvent::Removed(DownloadId(2))]);
-        assert_eq!(ui.get_selected_id(), -1);
-        assert_eq!(ui.get_downloads().row_count(), 1);
+        assert_eq!(selected(&ui), [1]);
+        app.apply([EngineEvent::Removed(DownloadId(1))]);
+        assert_eq!(ui.get_current_id(), -1);
+        assert_eq!(ui.get_downloads().row_count(), 0);
 
         // Sorting is reflected in the header.
         ui.invoke_sort(0);
@@ -909,30 +989,83 @@ pub mod tests {
             EngineEvent::Added(sample(2, "b.zip", DownloadState::Complete, 1, 1)),
             EngineEvent::Added(sample(3, "c.zip", DownloadState::Complete, 1, 1)),
         ]);
-        // With nothing selected, Resume does nothing.
+        // With nothing selected, Resume does nothing; Resume and Stop skip what they can't act on.
         ui.invoke_resume();
-        ui.set_selected_id(1);
+        ui.invoke_row_pressed(1, false, false);
         ui.invoke_resume();
         ui.invoke_stop();
         ui.invoke_stop_all();
-        ui.invoke_stop_download(2);
+        ui.invoke_resume_download(2);
         ui.invoke_delete_completed();
         // Deleting asks first; only the confirmation sends the command.
         ui.invoke_delete();
-        ui.invoke_delete_confirmed(1, false);
-        ui.invoke_delete_confirmed(2, true);
+        ui.invoke_delete_confirmed(false);
+        // A second confirmation has nothing left to delete.
+        ui.invoke_delete_confirmed(true);
         assert_eq!(
             *recorder.0.borrow(),
             [
                 "resume 1",
-                "pause 1",
                 "pause all",
-                "pause 2",
                 "delete 2 false",
                 "delete 3 false",
                 "delete 1 false",
-                "delete 2 true",
             ]
         );
+    }
+
+    #[test]
+    fn select_all_deletes_every_shown_download_after_one_question() {
+        let (ui, app, recorder) = app();
+        app.apply([
+            EngineEvent::Added(sample(1, "a.iso", DownloadState::Paused, 0, 10)),
+            EngineEvent::Added(sample(2, "b.zip", DownloadState::Complete, 1, 1)),
+            EngineEvent::Added(sample(3, "c.zip", DownloadState::Downloading, 0, 10)),
+        ]);
+        ui.invoke_select_all();
+        assert!(ui.get_downloads().iter().all(|r| r.selected));
+        assert!(ui.get_can_resume() && ui.get_can_stop() && ui.get_can_delete());
+
+        // The context menu of a selected row acts on the whole selection.
+        ui.invoke_stop_download(2);
+        ui.invoke_delete_download(2);
+        // Only the finished file goes with the box ticked.
+        ui.invoke_delete_confirmed(true);
+        let mut sent = recorder.0.borrow().clone();
+        sent.sort();
+        assert_eq!(
+            sent,
+            [
+                "delete 1 false",
+                "delete 2 true",
+                "delete 3 false",
+                "pause 3"
+            ]
+        );
+
+        // An unselected row's menu acts on that row alone.
+        ui.invoke_row_pressed(1, false, false);
+        ui.invoke_row_pressed(3, true, false);
+        ui.invoke_resume_download(2);
+        assert_eq!(recorder.0.borrow().len(), 4, "2 is complete");
+        ui.invoke_resume_download(1);
+        assert_eq!(recorder.0.borrow().last().unwrap(), "resume 1");
+    }
+
+    #[test]
+    fn the_delete_question_names_one_download_or_counts_many() {
+        let paused = sample(1, "a.iso", DownloadState::Paused, 0, 10);
+        let complete = sample(2, "b.zip", DownloadState::Complete, 1, 1);
+        assert_eq!(delete_prompt(&[]), None);
+        let (title, note, option) = delete_prompt(&[&paused]).unwrap();
+        assert_eq!(title, "Delete “a.iso” from the list?");
+        assert!(!note.is_empty() && option.is_empty());
+        let (_, note, option) = delete_prompt(&[&complete]).unwrap();
+        assert!(note.is_empty() && option == "Also delete the file from disk");
+        let (title, note, option) = delete_prompt(&[&paused, &complete]).unwrap();
+        assert_eq!(title, "Delete 2 downloads from the list?");
+        assert!(!note.is_empty() && option == "Also delete the finished files from disk");
+        let (_, note, _) = delete_prompt(&[&complete, &complete]).unwrap();
+        assert!(note.is_empty());
     }
 }

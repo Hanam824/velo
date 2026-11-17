@@ -33,6 +33,7 @@ export struct DownloadRow {
     can-stop: bool,
     // Whether the file is at its save path.
     finished: bool,
+    selected: bool,
 }
 
 // A column header: its title, the sort arrow and a handle to resize it.
@@ -99,19 +100,27 @@ component Cell inherits Text {
 
 export component DownloadList inherits Rectangle {
     in property <[DownloadRow]> rows;
-    // Id of the selected download, or -1.
-    in-out property <int> selected-id: -1;
+    // Id of the current row (the one last clicked, which Enter opens), or -1. Rust keeps the
+    // selection and marks each selected row.
+    in property <int> current-id: -1;
     // Column the rows are sorted by (0 = File Name … 7 = Description), and the direction.
     in property <int> sort-column: 0;
     in property <bool> sort-ascending: true;
 
-    callback selection-changed(id: int);
+    // A row was pressed: `toggle` (Ctrl, ⌘ on macOS) flips it in or out of the selection,
+    // `range` (Shift) selects from the current row to it.
+    callback pressed(id: int, toggle: bool, range: bool);
+    // Ctrl+A (⌘A on macOS).
+    callback select-all();
+    // The Delete key, for the selection.
+    callback delete-selected();
     // A row was double-clicked or Enter was pressed on it.
     callback activated(id: int);
     // A header was clicked: sort by that column (Rust flips the direction on a second click).
     callback sort(column: int);
-    // Up or down arrow key: move the selection by `delta` rows.
-    callback move-selection(delta: int);
+    // Up or down arrow key: move the current row by `delta` rows, extending the selection with
+    // Shift.
+    callback move-selection(delta: int, extend: bool);
     callback resume(id: int);
     callback stop(id: int);
     callback delete(id: int);
@@ -137,19 +146,23 @@ export component DownloadList inherits Rectangle {
     keys := FocusScope {
         key-pressed(event) => {
             if event.text == Key.UpArrow {
-                root.move-selection(-1);
+                root.move-selection(-1, event.modifiers.shift);
                 return accept;
             }
             if event.text == Key.DownArrow {
-                root.move-selection(1);
+                root.move-selection(1, event.modifiers.shift);
                 return accept;
             }
-            if event.text == Key.Return && root.selected-id >= 0 {
-                root.activated(root.selected-id);
+            if event.modifiers.control && (event.text == "a" || event.text == "A") {
+                root.select-all();
                 return accept;
             }
-            if event.text == Key.Delete && root.selected-id >= 0 {
-                root.delete(root.selected-id);
+            if event.text == Key.Return && root.current-id >= 0 {
+                root.activated(root.current-id);
+                return accept;
+            }
+            if event.text == Key.Delete {
+                root.delete-selected();
                 return accept;
             }
             reject
@@ -296,20 +309,22 @@ export component DownloadList inherits Rectangle {
                     Rectangle {
                         width: parent.width;
                         height: parent.height;
-                        background: row.id == root.selected-id ? Theme.selection
+                        background: row.selected ? Theme.selection
                             : touch.has-hover ? Theme.hover
                             : Math.mod(index, 2) == 1 ? Theme.stripe : transparent;
                         accessible-role: list-item;
                         accessible-label: row.name;
-                        accessible-item-selected: row.id == root.selected-id;
+                        accessible-item-selected: row.selected;
 
                         touch := TouchArea {
                             pointer-event(event) => {
+                                // A right press on a selected row keeps the selection, so its
+                                // context menu acts on all of it.
                                 if event.kind == PointerEventKind.down {
                                     keys.focus();
-                                    if root.selected-id != row.id {
-                                        root.selected-id = row.id;
-                                        root.selection-changed(row.id);
+                                    if event.button == PointerEventButton.left || !row.selected {
+                                        root.pressed(row.id, event.modifiers.control,
+                                            event.modifiers.shift);
                                     }
                                 }
                             }
