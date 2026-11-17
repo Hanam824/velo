@@ -213,4 +213,12 @@ fn streams_that_cant_be_joined_here_say_why_and_are_left_alone() {
         join_in_place(&garbage, 22, &audio),
         Err(Error::Malformed(_))
     ));
+
+    // Something else at the video's name (another download's file): nothing is cut off it.
+    let other = write(dir.path(), "other.bin", &[7u8; 4096]);
+    assert!(matches!(
+        join_in_place(&other, len, &audio),
+        Err(Error::Malformed(_))
+    ));
+    assert!(std::fs::read(&other).unwrap() == [7u8; 4096]);
 }

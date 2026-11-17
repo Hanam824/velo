@@ -94,11 +94,12 @@ pub fn join(video: &Path, video_len: u64, audio: &Path) -> Result<()> {
 /// Turns the fragmented video stream `video` into an unfragmented MP4 file that also holds the
 /// fragmented sound stream `audio`, writing only the sound and a new index.
 ///
-/// `video` is first cut back to `video_len` bytes, the stream as downloaded, so a join that
-/// stopped part way can run again: the boxes it turned into `free` are still recognised by what
-/// they hold. Both inputs are read and checked before anything is written, so an error other
-/// than [`Error::Io`] leaves `video` as the stream it was. `video` is synced to disk before this
-/// returns, and the time spent reading, writing and syncing is logged.
+/// `video`'s first `video_len` bytes, the stream as downloaded, must be whole boxes; anything
+/// after them is cut off, so a join that stopped part way can run again: the boxes it turned
+/// into `free` are still recognised by what they hold. Both inputs are read and checked before
+/// anything is written, so an error other than [`Error::Io`] leaves `video` as it was. `video`
+/// is synced to disk before this returns, and the time spent reading, writing and syncing is
+/// logged.
 pub fn join_in_place(video: &Path, video_len: u64, audio: &Path) -> Result<()> {
     let started = Instant::now();
     let mut file = OpenOptions::new().read(true).write(true).open(video)?;
@@ -107,10 +108,11 @@ pub fn join_in_place(video: &Path, video_len: u64, audio: &Path) -> Result<()> {
             "the video is shorter than its download".into(),
         ));
     }
-    file.set_len(video_len)?;
-    let pictures = Stream::read(&mut file)?;
+    // Read before cutting anything: a file that isn't this stream is left alone.
+    let pictures = Stream::read(&mut file, video_len)?;
     let mut sound_file = File::open(audio)?;
-    let sound = Stream::read(&mut sound_file)?;
+    let sound_len = sound_file.metadata()?.len();
+    let sound = Stream::read(&mut sound_file, sound_len)?;
 
     // The sound's media boxes go after the video, in order.
     let mut moved = Vec::with_capacity(sound.mdats.len());
@@ -149,6 +151,7 @@ pub fn join_in_place(video: &Path, video_len: u64, audio: &Path) -> Result<()> {
     let read = started.elapsed();
 
     let writing = Instant::now();
+    file.set_len(video_len)?;
     if let Some(ftyp) = pictures.ftyp {
         file.seek(SeekFrom::Start(ftyp.payload()))?;
         file.write_all(b"isom")?;
@@ -235,9 +238,9 @@ struct Chunk {
 const NON_SYNC: u32 = 0x0001_0000;
 
 impl Stream {
-    /// Reads the structure of the stream in `file`.
-    fn read(file: &mut File) -> Result<Self> {
-        let top = top_level(file)?;
+    /// Reads the structure of the stream in the first `len` bytes of `file`.
+    fn read(file: &mut File, len: u64) -> Result<Self> {
+        let top = top_level(file, len)?;
         // What each box is; a `free` box that holds an `mvhd` or `mfhd` was a `moov` or `moof`
         // until a join that stopped part way.
         let mut kinds = Vec::with_capacity(top.len());
@@ -734,13 +737,16 @@ fn mux_ffmpeg(ffmpeg: &Path, video: &Path, audio: &Path, out: &Path) -> Result<(
         .arg(audio)
         .args(["-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-f", "mp4"])
         .arg(out)
-        .output()?;
+        .output()
+        .inspect_err(|error| tracing::warn!(%error, "couldn't run ffmpeg"))?;
     if output.status.success() {
         Ok(())
     } else {
-        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        tracing::warn!(%error, "ffmpeg couldn't join the streams");
-        Err(Error::Ffmpeg(error))
+        // Its message names the files, so only the status is logged here.
+        tracing::warn!(status = %output.status, "ffmpeg couldn't join the streams");
+        Err(Error::Ffmpeg(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ))
     }
 }
 

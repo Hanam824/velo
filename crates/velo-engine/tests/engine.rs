@@ -882,7 +882,11 @@ async fn a_video_downloaded_before_a_failure_is_not_downloaded_again() {
     });
     let failed = wait_for_state(&mut events, id, |s| matches!(s, DownloadState::Failed(_))).await;
     assert!(velo_engine::temp_path(&failed.save_path()).is_file());
+    // Still owning that file, so removing or renaming the download takes it along.
+    assert!(!failed.segments.is_empty());
     first.shutdown().await;
+    // Something else takes the name meanwhile.
+    fs::write(failed.save_path(), b"someone else's file").unwrap();
 
     // A video fetched again now would hold other bytes.
     support::put_blob(
@@ -896,7 +900,12 @@ async fn a_video_downloaded_before_a_failure_is_not_downloaded_again() {
         matches!(s, DownloadState::Complete | DownloadState::Failed(_))
     })
     .await;
+    assert_eq!(done.file_name, "clip (1).mp4", "the next free name");
     let joined = fs::read(finished(&done)).unwrap();
     assert!(joined.windows(3).any(|w| w == [0x10; 3]), "the first video");
     assert!(!joined.windows(3).any(|w| w == [0x20; 3]));
+    assert_eq!(
+        fs::read(root.path().join("save").join("clip.mp4")).unwrap(),
+        b"someone else's file"
+    );
 }
