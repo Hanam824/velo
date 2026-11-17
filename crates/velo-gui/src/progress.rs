@@ -267,21 +267,48 @@ fn fill(window: &ProgressWindow, download: &Download, table: &DownloadTable) {
         })
         .unwrap_or_default();
     window.set_segments(ModelRc::new(VecModel::from(views)));
-    let connections: Vec<ConnectionRow> = segments
-        .iter()
-        .enumerate()
-        .map(|(index, s)| ConnectionRow {
-            number: index as i32 + 1,
-            downloaded: format::size(s.downloaded).into(),
-            info: match s.state {
-                SegmentState::Active if running && s.downloaded == 0 => "Connecting…",
-                SegmentState::Active if running => "Receiving data…",
-                SegmentState::Done => "Finished",
-                _ => "Waiting",
-            }
-            .into(),
-        })
-        .collect();
+    // One row per connection, each reused as its connection takes another piece; the bar above
+    // shows every piece.
+    let live = table.connections(download.id);
+    let connections: Vec<ConnectionRow> = if !running {
+        Vec::new()
+    } else if live.is_empty() {
+        // A single connection without ranges, or a video being joined: its segments.
+        segments
+            .iter()
+            .enumerate()
+            .map(|(index, s)| ConnectionRow {
+                number: index as i32 + 1,
+                downloaded: format::size(s.downloaded).into(),
+                info: match s.state {
+                    SegmentState::Active if s.downloaded == 0 => "Connecting…",
+                    SegmentState::Active => "Receiving data…",
+                    SegmentState::Done => "Finished",
+                    _ => "Waiting",
+                }
+                .into(),
+            })
+            .collect()
+    } else {
+        live.iter()
+            .enumerate()
+            .map(|(index, connection)| {
+                let piece = connection
+                    .segment
+                    .and_then(|id| segments.iter().find(|s| s.id == id));
+                ConnectionRow {
+                    number: index as i32 + 1,
+                    downloaded: format::size(connection.downloaded).into(),
+                    info: match piece {
+                        None => "Finished",
+                        Some(s) if s.downloaded == 0 => "Connecting…",
+                        Some(_) => "Receiving data…",
+                    }
+                    .into(),
+                }
+            })
+            .collect()
+    };
     window.set_connections(ModelRc::new(VecModel::from(connections)));
 }
 
@@ -293,7 +320,7 @@ fn whole_percent(done: u64, total: u64) -> String {
 #[cfg(test)]
 mod tests {
     use slint::Model;
-    use velo_core::{ProgressUpdate, Segment, SegmentId};
+    use velo_core::{ConnectionProgress, ProgressUpdate, Segment, SegmentId};
 
     use super::*;
     use crate::app::tests::Recorder;
@@ -309,7 +336,8 @@ mod tests {
         )
     }
 
-    /// A running 1000-byte download with two connections, the first further along.
+    /// A running 1000-byte download in two segments, with three connections: one on each
+    /// segment, the first further along, and one that has stopped.
     fn running() -> (Download, ProgressUpdate) {
         let mut download = sample(7, "big.iso", DownloadState::Downloading, 0, 1000);
         download.resumable = true;
@@ -318,12 +346,21 @@ mod tests {
         first.state = SegmentState::Active;
         let mut second = Segment::new(SegmentId(1), 500, 1000);
         second.state = SegmentState::Active;
+        let connection = |segment, downloaded| ConnectionProgress {
+            segment,
+            downloaded,
+        };
         let update = ProgressUpdate {
             id: download.id,
             downloaded: 300,
             total: Some(1000),
             rate: 100,
             segments: vec![first, second],
+            connections: vec![
+                connection(Some(SegmentId(0)), 300),
+                connection(Some(SegmentId(1)), 0),
+                connection(None, 0),
+            ],
         };
         (download, update)
     }
@@ -350,9 +387,27 @@ mod tests {
         assert_eq!(segments.row_count(), 2);
         assert_eq!(segments.row_data(1).unwrap().start, 0.5);
         assert!((segments.row_data(0).unwrap().done - 0.3).abs() < 1e-6);
+        // One row per connection, not per segment.
         let connections = window.get_connections();
-        assert_eq!(connections.row_data(0).unwrap().info, "Receiving data…");
-        assert_eq!(connections.row_data(1).unwrap().info, "Connecting…");
+        let rows: Vec<(String, String)> = connections
+            .iter()
+            .map(|row| (row.downloaded.to_string(), row.info.to_string()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("300 B".into(), "Receiving data…".into()),
+                ("0 B".into(), "Connecting…".into()),
+                ("0 B".into(), "Finished".into()),
+            ]
+        );
+
+        // A stopped download has no connections to show.
+        let mut paused = download.clone();
+        paused.state = DownloadState::Paused;
+        table.upsert(paused);
+        dialogs.update(&table);
+        assert_eq!(window.get_connections().row_count(), 0);
     }
 
     #[test]

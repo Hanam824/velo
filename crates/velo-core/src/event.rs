@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Download, DownloadId, Queue, QueueId, Segment};
+use crate::{Download, DownloadId, Queue, QueueId, Segment, SegmentId};
 
 /// Something that happened in the download engine.
 ///
@@ -42,4 +42,16 @@ pub struct ProgressUpdate {
     pub rate: u64,
     /// The segments as they are now.
     pub segments: Vec<Segment>,
+    /// Each of its connections, in order; empty when it doesn't download in segments.
+    #[serde(default)]
+    pub connections: Vec<ConnectionProgress>,
+}
+
+/// One connection of a running download.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionProgress {
+    /// The segment it is downloading; `None` before it takes one and once it has stopped.
+    pub segment: Option<SegmentId>,
+    /// Bytes it has received since the download started.
+    pub downloaded: u64,
 }

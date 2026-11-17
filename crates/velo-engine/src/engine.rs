@@ -875,6 +875,7 @@ impl Actor {
                 total: entry.download.total_size,
                 rate: running.rate.update(now, downloaded),
                 segments,
+                connections: running.progress.connections(),
             }));
             if save && entry.download.state == DownloadState::Downloading {
                 // A resume after a crash starts from these, so only synced bytes count.

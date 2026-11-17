@@ -70,6 +70,28 @@ async fn a_file_downloads_over_several_connections_into_one_file() {
 }
 
 #[tokio::test]
+async fn each_connection_reports_its_bytes_and_stops_when_done() {
+    let options = Options {
+        max_connections: 3,
+        ..options()
+    };
+    let (_root, progress, result) = download("/slow/data.bin", &options).await;
+    assert!(fs::read(result.unwrap()).unwrap() == body());
+    let connections = progress.connections();
+    assert_eq!(
+        connections.len(),
+        3,
+        "one per connection, however many segments"
+    );
+    assert_eq!(
+        connections.iter().map(|c| c.downloaded).sum::<u64>(),
+        SIZE as u64,
+        "every byte counted once, by the connection that received it"
+    );
+    assert!(connections.iter().all(|c| c.segment.is_none()));
+}
+
+#[tokio::test]
 async fn cut_off_connections_are_retried() {
     let (_root, _, result) = download("/flaky/data.bin", &options()).await;
     assert!(fs::read(result.unwrap()).unwrap() == body());

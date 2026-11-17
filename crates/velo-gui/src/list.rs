@@ -4,7 +4,10 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use velo_core::{Category, Download, DownloadId, DownloadState, ProgressUpdate, Queue, QueueId};
+use velo_core::{
+    Category, ConnectionProgress, Download, DownloadId, DownloadState, ProgressUpdate, Queue,
+    QueueId,
+};
 
 use crate::{DownloadRow, FileKind, format};
 
@@ -273,6 +276,12 @@ impl DownloadTable {
         self.rate_of(download.id)
     }
 
+    /// The connections of running download `id`, in order; empty if it isn't running or
+    /// doesn't download in segments.
+    pub fn connections(&self, id: DownloadId) -> &[ConnectionProgress] {
+        self.progress.get(&id).map_or(&[], |p| &p.connections)
+    }
+
     /// The segments of `download` as they are now: live while it runs, saved otherwise.
     pub fn segments<'a>(&'a self, download: &'a Download) -> &'a [velo_core::Segment] {
         match self.progress.get(&download.id) {
@@ -448,6 +457,7 @@ pub mod tests {
             total: Some(10_000),
             rate: 2_048,
             segments: Vec::new(),
+            connections: Vec::new(),
         });
         let row = &table.rows()[0];
         assert_eq!(row.status, "40.00%");
