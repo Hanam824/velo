@@ -1,21 +1,9 @@
 //! Joining synthetic fragmented MP4 streams built here, box by box.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use velo_mux::testing::{mp4_box, mvhd, stream, trak};
-use velo_mux::{Error, mux_mp4};
-
-/// What the joined file holds, read back with a parser written for this test.
-struct Parsed {
-    traks: Vec<u32>,
-    trexes: Vec<u32>,
-    next_track: u32,
-    /// `mvhd`'s duration and `mehd`'s.
-    durations: (u32, u64),
-    /// For each fragment: sequence, track, sample count and its sample bytes.
-    fragments: Vec<(u32, u32, u32, Vec<u8>)>,
-    audio_edit: u32,
-}
+use velo_mux::{Error, join_in_place};
 
 fn be32(buf: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(buf[at..at + 4].try_into().unwrap())
@@ -39,163 +27,198 @@ fn find<'a>(buf: &'a [u8], kind: &[u8; 4]) -> &'a [u8] {
     &buf[start + 8..end]
 }
 
-fn parse(file: &[u8]) -> Parsed {
-    let top = walk(file);
-    let kinds: Vec<[u8; 4]> = top.iter().map(|(k, ..)| *k).collect();
-    assert_eq!(&kinds[..2], [*b"ftyp", *b"moov"]);
-    assert!(!kinds.contains(b"sidx"));
-    let moov = &file[top[1].1 + 8..top[1].2];
-    let mvhd = find(moov, b"mvhd");
-    let mut traks = Vec::new();
-    let mut audio_edit = 0;
-    for (kind, start, end) in walk(moov) {
-        if &kind == b"trak" {
-            let trak = &moov[start + 8..end];
-            let id = be32(find(trak, b"tkhd"), 12);
-            if id == 2 {
-                audio_edit = be32(find(find(trak, b"edts"), b"elst"), 8);
-            }
-            traks.push(id);
-        }
-    }
-    let trexes = walk(find(moov, b"mvex"))
-        .into_iter()
-        .filter(|(k, ..)| k == b"trex")
-        .map(|(_, start, _)| be32(find(moov, b"mvex"), start + 8 + 4))
+/// A track of the joined file, read back from its sample tables.
+struct Track {
+    id: u32,
+    /// `tkhd`'s and the single edit's length, in the movie timescale.
+    lengths: (u32, u32),
+    /// The sum of the sample durations, from `stts`.
+    media_length: u32,
+    /// Each sample's bytes, found through `stsc`, `stco` and `stsz`.
+    samples: Vec<Vec<u8>>,
+}
+
+fn track(file: &[u8], trak: &[u8]) -> Track {
+    let tkhd = find(trak, b"tkhd");
+    let elst = find(find(trak, b"edts"), b"elst");
+    let stbl = find(find(find(trak, b"mdia"), b"minf"), b"stbl");
+    let stts = find(stbl, b"stts");
+    let media_length = (0..be32(stts, 4) as usize)
+        .map(|n| be32(stts, 8 + n * 8) * be32(stts, 12 + n * 8))
+        .sum();
+    let stsz = find(stbl, b"stsz");
+    let sizes: Vec<usize> = (0..be32(stsz, 8) as usize)
+        .map(|n| be32(stsz, 12 + n * 4) as usize)
         .collect();
-    let mut fragments = Vec::new();
-    for (i, &(kind, start, end)) in top.iter().enumerate() {
-        if &kind != b"moof" {
-            continue;
+    let stco = find(stbl, b"stco");
+    let chunks: Vec<usize> = (0..be32(stco, 4) as usize)
+        .map(|n| be32(stco, 8 + n * 4) as usize)
+        .collect();
+    let stsc = find(stbl, b"stsc");
+    let entries: Vec<(usize, usize)> = (0..be32(stsc, 4) as usize)
+        .map(|n| {
+            (
+                be32(stsc, 8 + n * 12) as usize,
+                be32(stsc, 12 + n * 12) as usize,
+            )
+        })
+        .collect();
+    let mut samples = Vec::new();
+    let mut sizes = sizes.iter();
+    for (index, &offset) in chunks.iter().enumerate() {
+        let per_chunk = entries
+            .iter()
+            .rev()
+            .find(|(first, _)| *first <= index + 1)
+            .unwrap()
+            .1;
+        let mut at = offset;
+        for _ in 0..per_chunk {
+            let size = *sizes.next().unwrap();
+            samples.push(file[at..at + size].to_vec());
+            at += size;
         }
-        let moof = &file[start + 8..end];
-        let sequence = be32(find(moof, b"mfhd"), 4);
-        let traf = find(moof, b"traf");
-        let track = be32(find(traf, b"tfhd"), 4);
-        let trun = find(traf, b"trun");
-        let count = be32(trun, 4);
-        let data_offset = be32(trun, 8) as usize;
-        let (mdat_kind, mdat_start, mdat_end) = top[i + 1];
-        assert_eq!(&mdat_kind, b"mdat");
-        assert_eq!(
-            start + data_offset,
-            mdat_start + 8,
-            "the data offset still points at the samples"
-        );
-        fragments.push((
-            sequence,
-            track,
-            count,
-            file[mdat_start + 8..mdat_end].to_vec(),
-        ));
     }
-    let mvex = find(moov, b"mvex");
-    let mehd = find(mvex, b"mehd");
-    assert_eq!(mehd[0], 1, "a 64-bit mehd");
-    Parsed {
-        traks,
-        trexes,
-        next_track: be32(mvhd, 96),
-        durations: (
-            be32(mvhd, 16),
-            u64::from_be_bytes(mehd[4..12].try_into().unwrap()),
-        ),
-        fragments,
-        audio_edit,
+    assert!(sizes.next().is_none(), "every sample is in a chunk");
+    Track {
+        id: be32(tkhd, 12),
+        lengths: (be32(tkhd, 20), be32(elst, 8)),
+        media_length,
+        samples,
     }
 }
 
-fn write(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+/// The bytes of the samples `testing::stream` puts in its fragments `0..fragments`.
+fn stream_samples(fill: u8, fragments: u8) -> Vec<Vec<u8>> {
+    (0..fragments)
+        .flat_map(|n| [vec![fill + n; 3 + n as usize], vec![fill + n; 2]])
+        .collect()
+}
+
+fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, bytes).unwrap();
     path
 }
 
-#[test]
-fn video_and_audio_fragments_are_interleaved_by_time_in_one_file() {
-    let dir = tempfile::tempdir().unwrap();
-    // Video at 90 kHz: fragments at 0, 2 and 4 s. Audio at 44.1 kHz: 0, 1.5, 3 and 4.5 s.
-    let video = write(
-        dir.path(),
-        "video.mp4",
-        &stream(1, 1000, 90_000, b"vide", &[0, 180_000, 360_000], 0x10),
+/// A video at 90 kHz with fragments at 0, 2 and 4 s, and a sound at 44.1 kHz with fragments at
+/// 0, 1.5, 3 and 4.5 s; returns their paths and the video's length.
+fn streams(dir: &Path) -> (PathBuf, u64, PathBuf) {
+    let video = stream(1, 1000, 90_000, b"vide", &[0, 180_000, 360_000], 0x10);
+    let len = video.len() as u64;
+    let audio = stream(
+        1,
+        44_100,
+        44_100,
+        b"soun",
+        &[0, 66_150, 132_300, 198_450],
+        0x80,
     );
-    let audio = write(
-        dir.path(),
-        "audio.m4a",
-        &stream(
-            1,
-            44_100,
-            44_100,
-            b"soun",
-            &[0, 66_150, 132_300, 198_450],
-            0x80,
-        ),
-    );
-    let out = dir.path().join("joined.mp4");
-    mux_mp4(&video, &audio, &out).unwrap();
-
-    let parsed = parse(&std::fs::read(&out).unwrap());
-    assert_eq!(parsed.traks, [1, 2]);
-    assert_eq!(parsed.trexes, [1, 2]);
-    assert_eq!(parsed.next_track, 3);
-    // The length is given once, in mehd (5 s in the video's movie timescale); the tracks' own
-    // durations are 0, since their samples are all in fragments.
-    assert_eq!(parsed.durations, (0, 5 * 1000));
-    assert_eq!(parsed.audio_edit, 0);
-
-    let order: Vec<(u32, u32)> = parsed
-        .fragments
-        .iter()
-        .map(|(sequence, track, ..)| (*sequence, *track))
-        .collect();
-    assert_eq!(
-        order,
-        [(1, 1), (2, 2), (3, 2), (4, 1), (5, 2), (6, 1), (7, 2)],
-        "0 s video, 0 s audio, 1.5 s audio, 2 s video, 3 s audio, 4 s video, 4.5 s audio"
-    );
-    let samples: u32 = parsed.fragments.iter().map(|f| f.2).sum();
-    assert_eq!(samples, 2 * (3 + 4));
-    // The second video fragment's samples, copied byte for byte.
-    assert_eq!(
-        parsed.fragments[3].3,
-        [vec![0x11; 4], vec![0x11; 2]].concat()
-    );
-    assert_eq!(
-        parsed.fragments[6].3,
-        [vec![0x83; 6], vec![0x83; 2]].concat()
-    );
+    (
+        write(dir, "video.mp4", &video),
+        len,
+        write(dir, "audio.m4a", &audio),
+    )
 }
 
 #[test]
-fn streams_that_cant_be_joined_here_say_why() {
+fn the_video_becomes_an_unfragmented_file_with_the_sound_after_it() {
     let dir = tempfile::tempdir().unwrap();
-    let audio = write(
-        dir.path(),
-        "audio.m4a",
-        &stream(1, 1000, 44_100, b"soun", &[0], 0x80),
-    );
-    // No mvex: an ordinary, unfragmented MP4.
-    let plain = write(
-        dir.path(),
-        "plain.mp4",
-        &[
-            mp4_box(b"ftyp", b"isom\0\0\0\0"),
-            mp4_box(
-                b"moov",
-                &[mvhd(1000, 0), trak(1, 90_000, b"vide", 0)].concat(),
-            ),
-        ]
-        .concat(),
-    );
-    let out = dir.path().join("out.mp4");
+    let (video, len, audio) = streams(dir.path());
+    let before = std::fs::read(&video).unwrap();
+    join_in_place(&video, len, &audio).unwrap();
+    let file = std::fs::read(&video).unwrap();
+
+    let top = walk(&file);
+    let kinds: Vec<[u8; 4]> = top.iter().map(|(k, ..)| *k).collect();
+    assert_eq!(&kinds[0], b"ftyp");
+    assert_eq!(&file[8..12], b"isom", "an ordinary MP4 brand");
+    assert_eq!(kinds.last().unwrap(), b"moov", "the index comes last");
+    assert_eq!(kinds.iter().filter(|k| *k == b"moov").count(), 1);
+    assert!(!kinds.iter().any(|k| k == b"moof" || k == b"sidx"));
+    assert_eq!(kinds.iter().filter(|k| *k == b"mdat").count(), 3 + 4);
+    // The video's samples stay where they were downloaded.
+    for (kind, start, end) in walk(&before) {
+        if &kind == b"mdat" {
+            assert!(file[start..end] == before[start..end]);
+        }
+    }
+
+    let (_, start, end) = *top.last().unwrap();
+    let moov = &file[start + 8..end];
+    let mvhd = find(moov, b"mvhd");
+    assert_eq!(be32(mvhd, 96), 3, "next track ID");
+    assert_eq!(be32(mvhd, 16), 4500, "the longer track, in ms");
+    assert!(walk(moov).iter().all(|(k, ..)| k != b"mvex"));
+    let tracks: Vec<Track> = walk(moov)
+        .into_iter()
+        .filter(|(k, ..)| k == b"trak")
+        .map(|(_, start, end)| track(&file, &moov[start + 8..end]))
+        .collect();
+    assert_eq!(tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [1, 2]);
+    // Each fragment's gap to the next lengthens its last sample, so the tracks keep time.
+    assert_eq!(tracks[0].media_length, 360_000);
+    assert_eq!(tracks[0].lengths, (4000, 4000));
+    assert_eq!(tracks[1].media_length, 198_450);
+    assert_eq!(tracks[1].lengths, (4500, 4500));
+    assert_eq!(tracks[0].samples, stream_samples(0x10, 3));
+    assert_eq!(tracks[1].samples, stream_samples(0x80, 4));
+}
+
+#[test]
+fn a_join_that_runs_again_gives_the_same_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (video, len, audio) = streams(dir.path());
+    join_in_place(&video, len, &audio).unwrap();
+    let first = std::fs::read(&video).unwrap();
+    // As after a join that stopped part way: it starts again from the renamed boxes.
+    join_in_place(&video, len, &audio).unwrap();
+    assert!(std::fs::read(&video).unwrap() == first);
+}
+
+#[test]
+fn streams_that_cant_be_joined_here_say_why_and_are_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (video, len, audio) = streams(dir.path());
+    // Absolute data offsets: tfhd's base-data-offset flag.
+    let mut bytes = std::fs::read(&video).unwrap();
+    let tfhd = bytes.windows(4).position(|w| w == b"tfhd").unwrap();
+    bytes[tfhd + 7] |= 1;
+    std::fs::write(&video, &bytes).unwrap();
     assert!(matches!(
-        mux_mp4(&plain, &audio, &out),
+        join_in_place(&video, len, &audio),
+        Err(Error::Unsupported(reason)) if reason.contains("absolute")
+    ));
+    assert!(
+        std::fs::read(&video).unwrap() == bytes,
+        "nothing was written"
+    );
+
+    // No mvex: an ordinary, unfragmented MP4.
+    let plain = [
+        mp4_box(b"ftyp", b"isom\0\0\0\0"),
+        mp4_box(
+            b"moov",
+            &[mvhd(1000, 0), trak(1, 90_000, b"vide", 0)].concat(),
+        ),
+    ]
+    .concat();
+    let plain_path = write(dir.path(), "plain.mp4", &plain);
+    assert!(matches!(
+        join_in_place(&plain_path, plain.len() as u64, &audio),
         Err(Error::Unsupported(reason)) if reason.contains("fragmented")
     ));
     let garbage = write(dir.path(), "garbage.mp4", b"not an mp4 file at all");
     assert!(matches!(
-        mux_mp4(&garbage, &audio, &out),
+        join_in_place(&garbage, 22, &audio),
         Err(Error::Malformed(_))
     ));
+
+    // Something else at the video's name (another download's file): nothing is cut off it.
+    let other = write(dir.path(), "other.bin", &[7u8; 4096]);
+    assert!(matches!(
+        join_in_place(&other, len, &audio),
+        Err(Error::Malformed(_))
+    ));
+    assert!(std::fs::read(&other).unwrap() == [7u8; 4096]);
 }

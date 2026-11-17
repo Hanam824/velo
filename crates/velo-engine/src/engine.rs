@@ -5,7 +5,7 @@
 //! [`EngineEvent`]s on a broadcast channel: the app's list and its store both listen there.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -26,23 +26,25 @@ use velo_core::Settings;
 
 use crate::{Error, Limiter, Options, Progress, RequestOptions, Result, client_with};
 
-/// Whether `download` writes into `<save path>.velo-tmp` that it reserved: a plain download
-/// once it has segments. A video's streams are in its temp folder; it reserves its name only to
-/// join them, which runs to the end once started, so a `.velo-tmp` at its name may be another
-/// download's.
-fn has_claimed(download: &Download) -> bool {
-    let streams =
-        matches!(&download.source, Some(Source::YouTube { itags, .. }) if itags.len() >= 2);
-    !streams && !download.segments.is_empty()
+/// Whether `download` writes into `<save path>.velo-tmp` that it reserved: any download once it
+/// has segments. A video's own stream goes there too, and keeps a finished segment until its
+/// sound's segments replace it.
+///
+/// A video paused by an older version, which kept its video stream in `temp_dir` (`stream-0`)
+/// and reserved no name, hasn't: a `.velo-tmp` at its name may be another download's. Its next
+/// run moves the stream to a name it claims.
+fn has_claimed(download: &Download, temp_dir: &Path) -> bool {
+    let old = temp_dir.join(download.id.0.to_string()).join("stream-0");
+    !download.segments.is_empty() && !old.exists() && !crate::temp_path(&old).exists()
 }
 
 /// Gives a settled `download` the file name `name`. A claimed unfinished file moves with it, so
 /// the download never resumes into another download's file; if it can't be moved the name stays.
-fn rename(download: &mut Download, name: &str) {
+fn rename(download: &mut Download, name: &str, temp_dir: &Path) {
     if name == download.file_name {
         return;
     }
-    if has_claimed(download) {
+    if has_claimed(download, temp_dir) {
         if crate::temp_path(&download.save_path()).exists() {
             // On failure (logged) the download keeps its name and file.
             let _ = crate::download::move_claim(download, name);
@@ -898,8 +900,9 @@ impl Actor {
         let parts = self.config.temp_dir.join(id.0.to_string());
         let file =
             (delete_file && entry.download.is_finished()).then(|| entry.download.save_path());
-        let data = (!entry.download.is_finished() && has_claimed(&entry.download))
-            .then(|| crate::temp_path(&entry.download.save_path()));
+        let data = (!entry.download.is_finished()
+            && has_claimed(&entry.download, &self.config.temp_dir))
+        .then(|| crate::temp_path(&entry.download.save_path()));
         tokio::spawn(async move {
             let _ = remove_dir(&parts).await;
             if let Some(data) = data {
@@ -949,7 +952,7 @@ impl Actor {
                 .as_deref()
                 .and_then(crate::sanitize_file_name)
             {
-                rename(download, &name);
+                rename(download, &name, &self.config.temp_dir);
             }
             if let Some(url) = edit.url.filter(|u| reqwest::Url::parse(u).is_ok()) {
                 download.url = url;

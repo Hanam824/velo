@@ -93,9 +93,9 @@ pub fn descendant(buf: &[u8], parent: &BoxRef, path: &[&[u8; 4]]) -> Result<Opti
     Ok(Some(current))
 }
 
-/// The top-level boxes of `file`, read from their headers only.
-pub fn top_level(file: &mut File) -> Result<Vec<BoxRef>> {
-    let len = file.metadata()?.len();
+/// The top-level boxes in the first `len` bytes of `file`, read from their headers only; they
+/// must fill those bytes exactly.
+pub fn top_level(file: &mut File, len: u64) -> Result<Vec<BoxRef>> {
     let mut found = Vec::new();
     let mut at = 0u64;
     while at < len {
