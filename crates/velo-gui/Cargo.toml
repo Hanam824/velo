@@ -12,7 +12,7 @@ name = "velo"
 path = "src/main.rs"
 
 [dependencies]
-chrono.workspace = true
+jiff.workspace = true
 velo-core.workspace = true
 velo-engine.workspace = true
 velo-extract.workspace = true

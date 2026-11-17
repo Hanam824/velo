@@ -1,54 +1,55 @@
 //! When a queue's schedule starts or stops it. Pure functions of the local time, so the engine
 //! asks them on its clock and the tests can ask them for any moment.
 
-use chrono::{Datelike, Duration, NaiveDateTime};
+use jiff::SignedDuration;
+use jiff::civil::{DateTime, Time};
 use velo_core::{Schedule, TimeOfDay};
 
 /// How late a start or stop may still happen, such as after the computer woke from sleep.
-const GRACE: Duration = Duration::minutes(5);
+const GRACE: SignedDuration = SignedDuration::from_mins(5);
 
 /// Whether a queue with `schedule` should start at `now`, given when the schedule last started
 /// it.
 ///
 /// That is when today's start time passed less than five minutes ago, today is one of the
 /// chosen weekdays (any day for a once-only schedule), and this start hasn't happened yet.
-pub fn start_due(schedule: &Schedule, now: NaiveDateTime, last: Option<NaiveDateTime>) -> bool {
+pub fn start_due(schedule: &Schedule, now: DateTime, last: Option<DateTime>) -> bool {
     let Some(time) = schedule.start_at else {
         return false;
     };
-    let day = now.weekday().num_days_from_monday() as usize;
+    let day = now.weekday().to_monday_zero_offset() as usize;
     (schedule.is_once() || schedule.days[day]) && due(time, now, last)
 }
 
 /// Whether a queue with `schedule` should stop at `now`, given when the schedule last stopped
 /// it. The stop time applies every day.
-pub fn stop_due(schedule: &Schedule, now: NaiveDateTime, last: Option<NaiveDateTime>) -> bool {
+pub fn stop_due(schedule: &Schedule, now: DateTime, last: Option<DateTime>) -> bool {
     schedule.stop_at.is_some_and(|time| due(time, now, last))
 }
 
 /// Whether today's `time` passed less than [`GRACE`] before `now`, and `last` is earlier.
-fn due(time: TimeOfDay, now: NaiveDateTime, last: Option<NaiveDateTime>) -> bool {
-    let Some(at) = now
-        .date()
-        .and_hms_opt(u32::from(time.hour), u32::from(time.minute), 0)
-    else {
+///
+/// A `time` out of range (from a hand-edited settings file) is never due.
+fn due(time: TimeOfDay, now: DateTime, last: Option<DateTime>) -> bool {
+    let (Ok(hour), Ok(minute)) = (i8::try_from(time.hour), i8::try_from(time.minute)) else {
         return false;
     };
+    let Ok(time) = Time::new(hour, minute, 0, 0) else {
+        return false;
+    };
+    let at = now.date().to_datetime(time);
     at <= now && now < at + GRACE && last.is_none_or(|last| last < at)
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
+    use jiff::civil::date;
 
     use super::*;
 
     /// Monday 26 October 2026 at `hour:minute:second`.
-    fn monday(hour: u32, minute: u32, second: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 10, 26)
-            .unwrap()
-            .and_hms_opt(hour, minute, second)
-            .unwrap()
+    fn monday(hour: i8, minute: i8, second: i8) -> DateTime {
+        date(2026, 10, 26).at(hour, minute, second, 0)
     }
 
     fn at(hour: u8, minute: u8, days: [bool; 7]) -> Schedule {
@@ -74,7 +75,7 @@ mod tests {
             Some(monday(2, 30, 1))
         ));
         // Started yesterday: today's start is still due.
-        let yesterday = monday(2, 30, 0) - Duration::days(1);
+        let yesterday = monday(2, 30, 0).yesterday().unwrap();
         assert!(start_due(&schedule, monday(2, 31, 0), Some(yesterday)));
     }
 
@@ -92,5 +93,17 @@ mod tests {
         ));
         assert!(!stop_due(&Schedule::default(), monday(6, 0, 0), None));
         assert!(!start_due(&Schedule::default(), monday(2, 30, 0), None));
+    }
+
+    #[test]
+    fn a_time_out_of_range_is_never_due() {
+        let schedule = Schedule {
+            start_at: Some(TimeOfDay {
+                hour: 24,
+                minute: 0,
+            }),
+            ..at(0, 0, [true; 7])
+        };
+        assert!(!start_due(&schedule, monday(0, 0, 0), None));
     }
 }
