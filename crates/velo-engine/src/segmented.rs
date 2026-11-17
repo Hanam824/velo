@@ -18,7 +18,7 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use velo_core::{Segment, SegmentId, SegmentState, Settings};
+use velo_core::{ConnectionProgress, Segment, SegmentId, SegmentState, Settings};
 
 use crate::fetch::{WRITE_BUFFER, cancellable, send_range};
 use crate::{Error, Limiter, Result, planner};
@@ -82,6 +82,10 @@ struct State {
     /// Workers still running. Changed only under the same lock as the planner, so a worker
     /// that hands its segment back can tell whether another one is left to take it.
     workers: usize,
+    /// Each worker's connection: the segment it is on and the bytes it has received.
+    connections: Vec<ConnectionProgress>,
+    /// Which worker each active segment belongs to, by its index in `connections`.
+    owners: HashMap<SegmentId, usize>,
 }
 
 /// A worker's receiving speed, averaged over about [`RATE_WINDOW`].
@@ -156,6 +160,8 @@ impl State {
             durable,
             rates: HashMap::new(),
             workers: 0,
+            connections: Vec::new(),
+            owners: HashMap::new(),
         }
     }
 }
@@ -191,6 +197,11 @@ impl Progress {
                 })
                 .collect()
         })
+    }
+
+    /// Each worker's connection as it is now, in order; empty until the workers start.
+    pub fn connections(&self) -> Vec<ConnectionProgress> {
+        self.lock(|state| state.connections.clone())
     }
 
     /// Bytes downloaded so far, summed over all segments.
@@ -333,10 +344,14 @@ pub async fn download_segments(
         stop: cancel.child_token(),
     });
     let mut workers = JoinSet::new();
-    progress.lock(|state| state.workers = options.max_connections.max(1) as usize);
-    for _ in 0..options.max_connections.max(1) {
+    let count = options.max_connections.max(1) as usize;
+    progress.lock(|state| {
+        state.workers = count;
+        state.connections = vec![ConnectionProgress::default(); count];
+    });
+    for index in 0..count {
         let worker = Arc::clone(&worker);
-        workers.spawn(async move { worker.run().await });
+        workers.spawn(async move { worker.run(index).await });
     }
     let mut first_error = None;
     // One sync for every worker: syncing any handle puts the whole file's written bytes on disk.
@@ -416,8 +431,17 @@ struct Worker {
 }
 
 impl Worker {
-    /// Fetches segments until the planner has no more work worth a connection.
-    async fn run(&self) -> Result<()> {
+    /// Fetches segments as connection `index` until the planner has no more work worth a
+    /// connection.
+    async fn run(&self, index: usize) -> Result<()> {
+        let result = self.work(index).await;
+        self.progress
+            .lock(|state| state.connections[index].segment = None);
+        result
+    }
+
+    /// The loop of [`run`](Self::run).
+    async fn work(&self, index: usize) -> Result<()> {
         loop {
             if self.stop.is_cancelled() {
                 return Err(Error::Cancelled);
@@ -428,8 +452,12 @@ impl Worker {
                     planner::next_work(&mut state.segments, self.options.min_segment_size, |id| {
                         rates.get(&id).and_then(|r| r.per_second)
                     });
-                if next.is_none() {
-                    state.workers -= 1;
+                match next {
+                    Some(id) => {
+                        state.connections[index].segment = Some(id);
+                        state.owners.insert(id, index);
+                    }
+                    None => state.workers -= 1,
                 }
                 next
             });
@@ -571,6 +599,9 @@ impl Worker {
                 let take = (chunk.len() as u64).min(left).min(s.remaining()) as usize;
                 s.downloaded += take as u64;
                 let done = s.remaining() == 0;
+                if let Some(&owner) = state.owners.get(&id) {
+                    state.connections[owner].downloaded += take as u64;
+                }
                 if done {
                     s.state = SegmentState::Done;
                     state.rates.remove(&id);
