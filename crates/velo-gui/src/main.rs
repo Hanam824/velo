@@ -516,6 +516,14 @@ mod tests {
             total: Some(6_100 * mb),
             rate: 18 * mb + 400 * 1024,
             segments: sample_segments(6_100 * mb),
+            // A connection on each piece still downloading; the first one's piece is done.
+            connections: sample_segments(6_100 * mb)
+                .iter()
+                .map(|s| velo_core::ConnectionProgress {
+                    segment: (s.state != velo_core::SegmentState::Done).then_some(s.id),
+                    downloaded: s.downloaded,
+                })
+                .collect(),
         })]);
         ui.set_selected_id(2);
         ui.invoke_selection_changed(2);

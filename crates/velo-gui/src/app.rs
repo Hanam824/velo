@@ -860,6 +860,7 @@ pub mod tests {
                 total: Some(10_000),
                 rate: 1024,
                 segments: Vec::new(),
+                connections: Vec::new(),
             }),
         ]);
         assert_eq!(ui.get_downloads().row_count(), 2);

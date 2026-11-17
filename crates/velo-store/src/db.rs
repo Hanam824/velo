@@ -506,6 +506,7 @@ mod tests {
                 total: Some(1000),
                 rate: 1,
                 segments: Vec::new(),
+                connections: Vec::new(),
             }))
             .unwrap();
         assert_eq!(store.load_downloads().unwrap(), vec![download.clone()]);
