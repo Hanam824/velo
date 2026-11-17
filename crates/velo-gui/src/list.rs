@@ -2,7 +2,7 @@
 //! into rows for the table.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use velo_core::{
     Category, ConnectionProgress, Download, DownloadId, DownloadState, ProgressUpdate, Queue,
@@ -113,6 +113,12 @@ pub struct DownloadTable {
     filter: Filter,
     /// Each queued download's queue and its place in it, from 0.
     queued: HashMap<DownloadId, (QueueId, usize)>,
+    /// The selected downloads.
+    selected: HashSet<DownloadId>,
+    /// Where a Shift range starts: the row last clicked without Shift.
+    anchor: Option<DownloadId>,
+    /// The current row: the one last clicked, which Enter opens and the arrow keys move from.
+    focus: Option<DownloadId>,
 }
 
 impl Default for DownloadTable {
@@ -124,6 +130,9 @@ impl Default for DownloadTable {
             ascending: false,
             filter: Filter::default(),
             queued: HashMap::new(),
+            selected: HashSet::new(),
+            anchor: None,
+            focus: None,
         }
     }
 }
@@ -144,6 +153,9 @@ impl DownloadTable {
     pub fn remove(&mut self, id: DownloadId) {
         self.downloads.retain(|d| d.id != id);
         self.progress.remove(&id);
+        self.selected.remove(&id);
+        self.anchor = self.anchor.filter(|&a| a != id);
+        self.focus = self.focus.filter(|&f| f != id);
     }
 
     /// Records live progress for a running download.
@@ -187,8 +199,82 @@ impl DownloadTable {
     }
 
     /// Shows only the downloads `filter` accepts.
+    /// Shows only the downloads `filter` accepts; hidden downloads leave the selection.
     pub fn set_filter(&mut self, filter: Filter) {
         self.filter = filter;
+        let visible: HashSet<DownloadId> = self.sorted().iter().map(|d| d.id).collect();
+        self.selected.retain(|id| visible.contains(id));
+        self.anchor = self.anchor.filter(|id| visible.contains(id));
+        self.focus = self.focus.filter(|id| visible.contains(id));
+    }
+
+    /// Selects download `id` as a click does: alone, or flipping it in or out of the selection
+    /// with `toggle` (Ctrl), or with `range` (Shift) every row from the current one to it.
+    pub fn press(&mut self, id: DownloadId, toggle: bool, range: bool) {
+        if !self.is_visible(id) {
+            return;
+        }
+        let sorted: Vec<DownloadId> = self.sorted().iter().map(|d| d.id).collect();
+        let anchor = self
+            .anchor
+            .and_then(|a| sorted.iter().position(|&d| d == a));
+        self.focus = Some(id);
+        match (range, anchor) {
+            (true, Some(start)) => {
+                let end = sorted.iter().position(|&d| d == id).unwrap_or(start);
+                let (from, to) = (start.min(end), start.max(end));
+                if !toggle {
+                    self.selected.clear();
+                }
+                self.selected.extend(&sorted[from..=to]);
+            }
+            _ if toggle => {
+                if !self.selected.remove(&id) {
+                    self.selected.insert(id);
+                }
+                self.anchor = Some(id);
+            }
+            _ => {
+                self.selected = HashSet::from([id]);
+                self.anchor = Some(id);
+            }
+        }
+    }
+
+    /// Selects every row shown.
+    pub fn select_all(&mut self) {
+        let sorted: Vec<DownloadId> = self.sorted().iter().map(|d| d.id).collect();
+        if self.current().is_none() {
+            self.anchor = sorted.first().copied();
+            self.focus = self.anchor;
+        }
+        self.selected = sorted.into_iter().collect();
+    }
+
+    /// Moves the current row `delta` rows, selecting it alone, or with `extend` (Shift) the
+    /// rows from the range's start to it.
+    pub fn move_selection(&mut self, delta: i32, extend: bool) {
+        if let Some(next) = self.neighbour(self.current(), delta) {
+            self.press(next, false, extend);
+        }
+    }
+
+    /// The selected downloads shown, in display order.
+    pub fn selection(&self) -> Vec<&Download> {
+        self.sorted()
+            .into_iter()
+            .filter(|d| self.selected.contains(&d.id))
+            .collect()
+    }
+
+    /// Whether download `id` is selected.
+    pub fn is_selected(&self, id: DownloadId) -> bool {
+        self.selected.contains(&id)
+    }
+
+    /// The current row, if shown.
+    pub fn current(&self) -> Option<DownloadId> {
+        self.focus.filter(|&id| self.is_visible(id))
     }
 
     /// Whether download `id` exists and passes the filter.
@@ -366,12 +452,10 @@ impl DownloadTable {
                 .unwrap_or_default()
                 .into(),
             description: download.description.as_str().into(),
-            can_resume: matches!(
-                download.state,
-                DownloadState::Queued | DownloadState::Paused | DownloadState::Failed(_)
-            ),
+            can_resume: crate::toolbar::can_resume(download),
             can_stop: running,
             finished: download.is_finished(),
+            selected: self.selected.contains(&download.id),
         }
     }
 }
@@ -513,6 +597,87 @@ pub mod tests {
         );
         table.remove(DownloadId(2));
         assert_eq!(table.neighbour(Some(DownloadId(1)), 1), Some(DownloadId(3)));
+    }
+
+    #[test]
+    fn clicks_with_ctrl_and_shift_build_the_selection_in_display_order() {
+        let mut table = DownloadTable::default();
+        for id in 1..=5 {
+            table.upsert(sample(
+                id,
+                &format!("{id}.zip"),
+                DownloadState::Paused,
+                0,
+                1,
+            ));
+        }
+        table.sort_by(Column::Name);
+        let selected = |table: &DownloadTable| -> Vec<u64> {
+            table.selection().iter().map(|d| d.id.0).collect()
+        };
+        let id = DownloadId;
+
+        table.press(id(2), false, false);
+        assert_eq!((selected(&table), table.current()), (vec![2], Some(id(2))));
+        // Ctrl adds and removes single rows.
+        table.press(id(4), true, false);
+        assert_eq!(selected(&table), [2, 4]);
+        table.press(id(2), true, false);
+        assert_eq!(selected(&table), [4]);
+        // Shift selects from the last row clicked without it, in either direction.
+        table.press(id(1), true, false);
+        table.press(id(3), false, true);
+        assert_eq!(selected(&table), [1, 2, 3]);
+        table.press(id(5), false, true);
+        assert_eq!(selected(&table), [1, 2, 3, 4, 5]);
+        // The range follows the display order, not the ids.
+        table.sort_by(Column::Name);
+        table.press(id(4), false, false);
+        table.press(id(2), false, true);
+        assert_eq!(selected(&table), [4, 3, 2]);
+        assert_eq!(table.rows().iter().filter(|r| r.selected).count(), 3);
+        // A plain click selects one row again.
+        table.press(id(1), false, false);
+        assert_eq!(selected(&table), [1]);
+    }
+
+    #[test]
+    fn select_all_takes_the_shown_rows_and_arrows_move_or_extend() {
+        let mut table = DownloadTable::default();
+        table.upsert(sample(1, "a.zip", DownloadState::Complete, 1, 1));
+        table.upsert(sample(2, "b.zip", DownloadState::Paused, 0, 1));
+        table.upsert(sample(3, "c.zip", DownloadState::Paused, 0, 1));
+        table.sort_by(Column::Name);
+        let selected = |table: &DownloadTable| -> Vec<u64> {
+            table.selection().iter().map(|d| d.id.0).collect()
+        };
+
+        table.set_filter(Filter::from_key("unfinished"));
+        table.select_all();
+        assert_eq!(selected(&table), [2, 3]);
+        assert_eq!(table.current(), Some(DownloadId(2)));
+        // Hidden rows leave the selection.
+        table.set_filter(Filter::default());
+        table.select_all();
+        table.set_filter(Filter::from_key("finished"));
+        assert_eq!(selected(&table), [1]);
+        table.set_filter(Filter::default());
+        assert_eq!(selected(&table), [1]);
+
+        // The current row was hidden, so an arrow starts at the first row; arrows move one
+        // selected row, and with Shift they grow the range.
+        table.move_selection(1, false);
+        assert_eq!(selected(&table), [1]);
+        table.move_selection(1, false);
+        assert_eq!(selected(&table), [2]);
+        table.move_selection(1, true);
+        assert_eq!(selected(&table), [2, 3]);
+        assert_eq!(table.current(), Some(DownloadId(3)));
+        table.move_selection(-1, true);
+        assert_eq!(selected(&table), [2]);
+        // Removed downloads leave the selection.
+        table.remove(DownloadId(2));
+        assert!(selected(&table).is_empty() && table.current().is_none());
     }
 
     #[test]

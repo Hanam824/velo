@@ -7,31 +7,26 @@ use crate::AppWindow;
 /// The enabled state of the toolbar buttons that depend on the downloads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ToolbarState {
-    /// Resume: the selected download is queued, paused or failed.
+    /// Resume: a selected download is queued, paused or failed.
     pub resume: bool,
-    /// Stop: the selected download is running.
+    /// Stop: a selected download is running.
     pub stop: bool,
     /// Stop All: some download is running.
     pub stop_all: bool,
-    /// Delete: a download is selected.
+    /// Delete: some download is selected.
     pub delete: bool,
     /// Delete Completed: some download is complete.
     pub delete_completed: bool,
 }
 
 impl ToolbarState {
-    /// The state for `selected` (if any) among `downloads`.
-    pub fn new(selected: Option<&Download>, downloads: &[Download]) -> Self {
+    /// The state for the `selected` downloads among `downloads`.
+    pub fn new(selected: &[&Download], downloads: &[Download]) -> Self {
         Self {
-            resume: selected.is_some_and(|d| {
-                matches!(
-                    d.state,
-                    DownloadState::Queued | DownloadState::Paused | DownloadState::Failed(_)
-                )
-            }),
-            stop: selected.is_some_and(Download::is_running),
+            resume: selected.iter().any(|d| can_resume(d)),
+            stop: selected.iter().any(|d| d.is_running()),
             stop_all: downloads.iter().any(Download::is_running),
-            delete: selected.is_some(),
+            delete: !selected.is_empty(),
             delete_completed: downloads.iter().any(Download::is_finished),
         }
     }
@@ -44,6 +39,14 @@ impl ToolbarState {
         ui.set_can_delete(self.delete);
         ui.set_can_delete_completed(self.delete_completed);
     }
+}
+
+/// Whether `download` can be resumed: it is queued, paused or failed.
+pub fn can_resume(download: &Download) -> bool {
+    matches!(
+        download.state,
+        DownloadState::Queued | DownloadState::Paused | DownloadState::Failed(_)
+    )
 }
 
 #[cfg(test)]
@@ -64,7 +67,7 @@ mod tests {
             download(1, DownloadState::Downloading),
             download(2, DownloadState::Complete),
         ];
-        let state = ToolbarState::new(None, &downloads);
+        let state = ToolbarState::new(&[], &downloads);
         assert_eq!(
             state,
             ToolbarState {
@@ -73,7 +76,7 @@ mod tests {
                 ..ToolbarState::default()
             }
         );
-        assert_eq!(ToolbarState::new(None, &[]), ToolbarState::default());
+        assert_eq!(ToolbarState::new(&[], &[]), ToolbarState::default());
     }
 
     #[test]
@@ -89,14 +92,18 @@ mod tests {
             complete.clone(),
         ];
 
-        let state = ToolbarState::new(Some(&running), &all);
+        let state = ToolbarState::new(&[&running], &all);
         assert!(state.stop && !state.resume && state.delete);
         for stopped in [&paused, &failed] {
-            let state = ToolbarState::new(Some(stopped), &all);
+            let state = ToolbarState::new(&[stopped], &all);
             assert!(state.resume && !state.stop && state.delete);
         }
-        let state = ToolbarState::new(Some(&complete), &all);
+        let state = ToolbarState::new(&[&complete], &all);
         assert!(!state.resume && !state.stop && state.delete);
+
+        // A mixed selection can be resumed and stopped: each button acts on the ones it can.
+        let state = ToolbarState::new(&[&running, &paused, &complete], &all);
+        assert!(state.resume && state.stop && state.delete);
     }
 
     #[test]

@@ -328,6 +328,51 @@ fn a_running_download_is_stopped_resumed_and_deleted_from_the_toolbar() {
     assert_eq!(app.ui.get_status_message(), "0 downloads");
 }
 
+/// Presses and releases `key` in `window`, with Ctrl held down if `control`.
+fn key(window: &impl ComponentHandle, key: impl Into<slint::SharedString>, control: bool) {
+    let send = |event| window.window().dispatch_event(event);
+    let ctrl: slint::SharedString = slint::platform::Key::Control.into();
+    let text = key.into();
+    if control {
+        send(WindowEvent::KeyPressed { text: ctrl.clone() });
+    }
+    send(WindowEvent::KeyPressed { text: text.clone() });
+    send(WindowEvent::KeyReleased { text });
+    if control {
+        send(WindowEvent::KeyReleased { text: ctrl });
+    }
+}
+
+#[test]
+fn ctrl_a_and_delete_remove_every_download_and_their_files() {
+    let app = Harness::start();
+    app.add("/files/data.bin", true);
+    app.add("/files/data.bin", true);
+    app.pump_until("both downloads are finished", || {
+        let rows = app.ui.get_downloads();
+        rows.row_count() == 2 && rows.iter().all(|row| row.finished)
+    });
+    let saved: Vec<PathBuf> = app
+        .ui
+        .get_downloads()
+        .iter()
+        .map(|row| app.downloads().join(row.name.as_str()))
+        .collect();
+    assert!(saved.iter().all(|path| path.is_file()));
+
+    // Clicking a row puts the keys on the list; Ctrl+A selects both and Delete asks once.
+    click(&app.ui, "data.bin");
+    key(&app.ui, "a", true);
+    assert!(app.ui.get_downloads().iter().all(|row| row.selected));
+    key(&app.ui, slint::platform::Key::Delete, false);
+    click(&app.ui, "Also delete the finished files from disk");
+    press(&control(&app.ui, "Button", "Delete"));
+    app.pump_until("the downloads and their files are gone", || {
+        app.ui.get_downloads().row_count() == 0 && saved.iter().all(|path| !path.exists())
+    });
+    assert_eq!(app.ui.get_status_message(), "0 downloads");
+}
+
 #[test]
 fn deleting_an_unfinished_download_removes_what_it_downloaded() {
     let app = Harness::start();
