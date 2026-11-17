@@ -765,14 +765,11 @@ async fn a_video_and_its_sound_are_downloaded_in_turn_and_joined() {
     use velo_mux::testing::stream;
     let base = support::start().await;
     let root = tempfile::tempdir().unwrap();
-    support::put_blob(
-        "video.mp4",
-        stream(1, 1000, 90_000, b"vide", &[0, 180_000], 0x10),
-    );
-    support::put_blob(
-        "audio.m4a",
-        stream(1, 44_100, 44_100, b"soun", &[0, 66_150, 132_300], 0x80),
-    );
+    let video = stream(1, 1000, 90_000, b"vide", &[0, 180_000], 0x10);
+    let audio = stream(1, 44_100, 44_100, b"soun", &[0, 66_150, 132_300], 0x80);
+    let (video_len, audio_len) = (video.len(), audio.len());
+    support::put_blob("video.mp4", video);
+    support::put_blob("audio.m4a", audio);
     let config = EngineConfig {
         temp_dir: root.path().join("temp"),
         settings: settings(),
@@ -795,11 +792,23 @@ async fn a_video_and_its_sound_are_downloaded_in_turn_and_joined() {
         }),
         ..new_download(root.path(), "https://expired.invalid/old".into(), true)
     });
+    // While joining, the download shows both streams as one finished whole.
+    let joining_state = wait_for_state(&mut events, id, |s| *s == DownloadState::Merging).await;
+    let streams = (video_len + audio_len) as u64;
+    assert_eq!(joining_state.total_size, Some(streams));
+    assert_eq!(joining_state.downloaded(), streams);
+    assert!(
+        joining_state
+            .segments
+            .iter()
+            .all(|s| s.state == velo_core::SegmentState::Done)
+    );
     let done = wait_for_state(&mut events, id, |s| {
         matches!(s, DownloadState::Complete | DownloadState::Failed(_))
     })
     .await;
     let joined = fs::read(finished(&done)).unwrap();
+    assert_eq!(done.downloaded(), joined.len() as u64);
     assert_eq!(done.file_name, "clip.mp4");
     assert_eq!(done.total_size, Some(joined.len() as u64));
     assert_eq!(&joined[4..8], b"ftyp");
