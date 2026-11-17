@@ -261,7 +261,11 @@ impl App {
                 app.commands.delete(id, delete_file);
             }
         });
-        ui.on_download_activated(on_row(self, App::show_progress));
+        // A finished download opens its file; any other shows its progress.
+        ui.on_download_activated(on_row(self, |app, id| match app.finished_file(id) {
+            Some(path) => app.desktop.open(&path),
+            None => app.show_progress(id),
+        }));
         ui.on_appearance_changed(with(self, |app, appearance| {
             app.config
                 .update(|s| s.appearance = theme::from_ui(appearance));
@@ -822,13 +826,19 @@ pub mod tests {
         assert!(!app.progress.is_open(DownloadId(6)));
         assert!(app.completion.window(DownloadId(6)).is_some());
 
-        // Open and Open Folder from the context menu act on the saved file.
+        // A double-click, and Open and Open Folder from the context menu, act on the saved file.
+        ui.invoke_download_activated(6);
+        assert!(!app.progress.is_open(DownloadId(6)), "no progress to show");
         ui.invoke_open_file(6);
         ui.invoke_open_folder(6);
         let path = done.save_path().display().to_string();
         assert_eq!(
             *desktop.0.borrow(),
-            [format!("open {path}"), format!("reveal {path}")]
+            [
+                format!("open {path}"),
+                format!("open {path}"),
+                format!("reveal {path}")
+            ]
         );
         ui.invoke_properties(6);
         assert!(app.properties.window(DownloadId(6)).is_some());
