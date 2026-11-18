@@ -151,11 +151,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: velo-${{ matrix.name }}
+          # Only files named for this platform, so a wrong name fails here instead of overwriting
+          # another platform's file when the release merges every artifact into one folder.
           path: |
-            dist/velo-*.tar.gz
-            dist/velo-*.zip
-            dist/velo-*.dmg
-            dist/velo-*.exe
-            dist/velo-*.deb
-            dist/velo-*.AppImage
+            dist/velo-*-${{ matrix.name }}.*
+            dist/velo-*-${{ matrix.name }}_portable.zip
           if-no-files-found: error

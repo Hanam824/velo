@@ -3,7 +3,7 @@
 #
 #   ./scripts/package-release.sh v0.1.0
 #     -> dist/velo-v0.1.0-macos-arm64.tar.gz      (macOS, Linux: .tar.gz)
-#     -> dist/velo-v0.1.0-windows-x86_64.zip      (Windows, from Git Bash: .zip)
+#     -> dist/velo-v0.1.0-windows-x86_64_portable.zip  (Windows, from Git Bash: .zip, portable)
 #   ./scripts/package-release.sh v0.1.1-nightly.20261021   (a nightly build's version)
 #   ./scripts/package-release.sh v0.1.0 --installers
 #     also -> dist/velo-v0.1.0-macos-arm64.dmg        (macOS)
@@ -43,11 +43,14 @@ case "$(uname -s)" in
         exit 1
         ;;
 esac
-case "$(uname -m)" in
-    arm64 | aarch64) arch=arm64 ;;
-    x86_64 | amd64) arch=x86_64 ;;
+# The architecture cargo builds for, not the shell's: Git Bash on Windows ARM64 is an x86_64
+# program, so its `uname -m` says x86_64.
+host="$(rustc -vV | sed -n 's/^host: //p')"
+case "$host" in
+    aarch64-*) arch=arm64 ;;
+    x86_64-*) arch=x86_64 ;;
     *)
-        echo "unsupported architecture: $(uname -m)" >&2
+        echo "unsupported architecture: $host" >&2
         exit 1
         ;;
 esac
@@ -78,7 +81,7 @@ if [ "$os" = macos ]; then
 fi
 
 name="velo-$version-$os-$arch"
-rm -rf "dist/$name" "dist/$name.zip" "dist/$name.tar.gz"
+rm -rf "dist/$name" "dist/${name}_portable.zip" "dist/$name.tar.gz"
 mkdir -p "dist/$name"
 for bin in velo velo-cli velo-nmh; do
     cp "target/release/$bin$exe" "dist/$name/"
@@ -88,8 +91,9 @@ cp README.md LICENSE "dist/$name/"
 (
     cd dist
     if [ "$os" = windows ]; then
-        powershell -NoProfile -Command "Compress-Archive -Path '$name' -DestinationPath '$name.zip'"
-        echo "dist/$name.zip"
+        # Portable: unzip and run, no installer.
+        powershell -NoProfile -Command "Compress-Archive -Path '$name' -DestinationPath '${name}_portable.zip'"
+        echo "dist/${name}_portable.zip"
     else
         tar -czf "$name.tar.gz" "$name"
         echo "dist/$name.tar.gz"
