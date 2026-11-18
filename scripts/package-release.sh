@@ -43,11 +43,14 @@ case "$(uname -s)" in
         exit 1
         ;;
 esac
-case "$(uname -m)" in
-    arm64 | aarch64) arch=arm64 ;;
-    x86_64 | amd64) arch=x86_64 ;;
+# The architecture cargo builds for, not the shell's: Git Bash on Windows ARM64 is an x86_64
+# program, so its `uname -m` says x86_64.
+host="$(rustc -vV | sed -n 's/^host: //p')"
+case "$host" in
+    aarch64-*) arch=arm64 ;;
+    x86_64-*) arch=x86_64 ;;
     *)
-        echo "unsupported architecture: $(uname -m)" >&2
+        echo "unsupported architecture: $host" >&2
         exit 1
         ;;
 esac
