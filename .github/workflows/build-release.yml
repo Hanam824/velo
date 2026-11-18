@@ -153,5 +153,7 @@ jobs:
           name: velo-${{ matrix.name }}
           # Only files named for this platform, so a wrong name fails here instead of overwriting
           # another platform's file when the release merges every artifact into one folder.
-          path: dist/velo-*-${{ matrix.name }}.*
+          path: |
+            dist/velo-*-${{ matrix.name }}.*
+            dist/velo-*-${{ matrix.name }}_portable.zip
           if-no-files-found: error

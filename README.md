@@ -43,7 +43,7 @@ Download the file for your system from the [latest release](https://github.com/H
 
 | System | Installer | Archive |
 | --- | --- | --- |
-| Windows x64 / ARM64 | `velo-<version>-windows-<arch>.exe` (installs for the current user, no admin rights) | `.zip` |
+| Windows x64 / ARM64 | `velo-<version>-windows-<arch>.exe` (installs for the current user, no admin rights) | `velo-<version>-windows-<arch>_portable.zip` (unzip and run, no installing) |
 | macOS 15+, Apple Silicon / Intel | `velo-<version>-macos-<arch>.dmg` (drag Velo Download Manager to Applications) | `.tar.gz` |
 | Linux x86_64 | `velo-<version>-linux-x86_64.deb` or `.AppImage` | `.tar.gz` |
 
