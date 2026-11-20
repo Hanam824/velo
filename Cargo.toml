@@ -48,7 +48,7 @@ regex = "1"
 # No "http2": it would carry every range request of a download as a stream on one TCP connection, and a download is only faster over several.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "socks", "system-proxy"] }
 # SQLite compiled in, so every platform has the same version.
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
